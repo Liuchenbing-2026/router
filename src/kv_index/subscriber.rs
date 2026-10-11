@@ -3,7 +3,6 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use rmp_serde::from_slice;
 use sha2::{Digest, Sha256};
 use tokio::sync::{broadcast, mpsc};
 use tracing::{debug, info, warn};
@@ -19,7 +18,7 @@ use crate::kv_index::IngestionSignal;
 // ponytail: cache_salt/MM isolation deferred — needs raw msgpack capture of
 // per-block extra_keys tuples (custom newtype or rmpv); add when cost model
 // scores cross-salt collisions. Until then lora_name alone distinguishes adapters.
-fn local_hashes(token_ids: &[u32], block_size: u32, lora_name: Option<&str>) -> Vec<[u8; 32]> {
+pub fn local_hashes(token_ids: &[u32], block_size: u32, lora_name: Option<&str>) -> Vec<[u8; 32]> {
     let bs = block_size as usize;
     if bs == 0 {
         return Vec::new();
@@ -115,13 +114,36 @@ pub fn spawn(
             }
             match sub.recv_multipart(zmq::DONTWAIT) {
                 Ok(frames) => {
-                    if frames.len() < 3 {
+                    if frames.len() != 3 {
+                        emit(
+                            &signals,
+                            IngestionSignal::Rejected {
+                                source: source_id.clone(),
+                                seq: None,
+                            },
+                        );
                         continue;
                     }
-                    let seq = read_seq(&frames[1]);
-                    if seq == END_SEQ {
+                    let Some(seq) = read_seq(&frames[1]).filter(|seq| *seq >= 0) else {
+                        emit(
+                            &signals,
+                            IngestionSignal::Rejected {
+                                source: source_id.clone(),
+                                seq: None,
+                            },
+                        );
                         continue;
-                    }
+                    };
+                    let Some(batch) = decode(&frames[2]) else {
+                        emit(
+                            &signals,
+                            IngestionSignal::Rejected {
+                                source: source_id.clone(),
+                                seq: Some(seq),
+                            },
+                        );
+                        continue;
+                    };
                     if last_seq != -1 && seq < last_seq {
                         incarnation += 1;
                         warn!(
@@ -178,9 +200,7 @@ pub fn spawn(
                         }
                     }
                     if seq > last_seq {
-                        if let Some(batch) = decode(&frames[2]) {
-                            apply_batch(&indexer, &source_id, dp_rank, incarnation, &batch);
-                        }
+                        apply_batch(&indexer, &source_id, dp_rank, incarnation, &batch);
                         last_seq = seq;
                         emit(
                             &signals,
@@ -226,16 +246,12 @@ fn emit(tx: &Option<mpsc::Sender<IngestionSignal>>, signal: IngestionSignal) {
     }
 }
 
-fn read_seq(bytes: &[u8]) -> i64 {
-    if bytes.len() >= 8 {
-        i64::from_be_bytes(bytes[..8].try_into().unwrap_or([0u8; 8]))
-    } else {
-        -1
-    }
+fn read_seq(bytes: &[u8]) -> Option<i64> {
+    Some(i64::from_be_bytes(bytes.try_into().ok()?))
 }
 
 fn decode(payload: &[u8]) -> Option<KVEventBatch> {
-    match from_slice::<KVEventBatch>(payload) {
+    match crate::kv_index::decode_batch(payload) {
         Ok(b) => Some(b),
         Err(e) => {
             warn!("kv_index decode batch: {}", e);
@@ -381,19 +397,54 @@ async fn replay(
         match dealer.recv_multipart(zmq::DONTWAIT) {
             Ok(frames) => {
                 // DEALER reply: [empty, topic, seq, payload]; seq is 2nd-from-last.
-                if frames.len() < 4 {
+                if frames.len() != 4 {
+                    emit(
+                        &signals,
+                        IngestionSignal::Rejected {
+                            source: source_id.clone(),
+                            seq: None,
+                        },
+                    );
                     break;
                 }
-                let seq = read_seq(&frames[frames.len() - 2]);
+                let Some(seq) = read_seq(&frames[2]) else {
+                    emit(
+                        &signals,
+                        IngestionSignal::Rejected {
+                            source: source_id.clone(),
+                            seq: None,
+                        },
+                    );
+                    break;
+                };
                 if seq == END_SEQ {
                     break;
                 }
                 if seq <= high {
                     continue;
                 }
-                if let Some(batch) = decode(&frames[frames.len() - 1]) {
-                    apply_batch(indexer, source_id, dp_rank, incarnation, &batch);
+                let Some(batch) = decode(&frames[3]) else {
+                    emit(
+                        &signals,
+                        IngestionSignal::Rejected {
+                            source: source_id.clone(),
+                            seq: Some(seq),
+                        },
+                    );
+                    break;
+                };
+                if seq != high + 1 {
+                    emit(
+                        &signals,
+                        IngestionSignal::Gap {
+                            source: source_id.clone(),
+                            from_seq: high + 1,
+                            to_seq: seq - 1,
+                        },
+                    );
+                    break;
                 }
+                apply_batch(indexer, source_id, dp_rank, incarnation, &batch);
                 high = seq;
                 last_applied = Some(seq);
                 emit(
@@ -440,6 +491,7 @@ mod tests {
         ownership: Option<&str>,
     ) -> BlockStored {
         BlockStored {
+            extra_keys: None,
             block_hashes,
             parent_block_hash: None,
             token_ids,
@@ -514,13 +566,48 @@ mod tests {
 
     #[test]
     fn read_seq_big_endian_signed() {
-        assert_eq!(read_seq(&(-1i64).to_be_bytes()), -1);
-        assert_eq!(read_seq(&42i64.to_be_bytes()), 42);
+        assert_eq!(read_seq(&(-1i64).to_be_bytes()), Some(-1));
+        assert_eq!(read_seq(&42i64.to_be_bytes()), Some(42));
     }
 
     #[test]
-    fn read_seq_short_input_is_sentinel() {
-        assert_eq!(read_seq(&[0u8, 1]), -1);
+    fn read_seq_requires_exactly_eight_bytes() {
+        assert_eq!(read_seq(&[0u8, 1]), None);
+        assert_eq!(read_seq(&[0u8; 9]), None);
+    }
+
+    #[test]
+    fn malformed_batch_does_not_clear_resident_blocks() {
+        let idx = KvBlockIndexer::new();
+        let source = SourceId::from("w0");
+        let owner = owner_for(&source, 0, 0);
+        let local: Arc<str> = Arc::from("local");
+        idx.store(
+            0,
+            owner,
+            StorageTier::Device,
+            None,
+            &[(Arc::from("seq"), local.clone())],
+        );
+        let value = rmpv::Value::Array(vec![
+            1.0.into(),
+            rmpv::Value::Array(vec![rmpv::Value::Map(vec![
+                ("type".into(), "AllBlocksCleared".into()),
+                ("unknown".into(), true.into()),
+            ])]),
+            0.into(),
+        ]);
+        let mut payload = Vec::new();
+        rmpv::encode::write_value(&mut payload, &value).unwrap();
+        if let Some(batch) = decode(&payload) {
+            apply_batch(&idx, &source, 0, 0, &batch);
+        }
+        let matches = idx.find_matches(&MatchQuery {
+            group_idx: 0,
+            local_hashes: vec![local],
+            tiers_of_interest: vec![StorageTier::Device],
+        });
+        assert_eq!(matches.len(), 1, "invalid batch must not mutate residency");
     }
 
     #[test]
@@ -643,6 +730,7 @@ mod tests {
             1,
             1.0,
             &[KVEvent::BlockStored(BlockStored {
+                extra_keys: None,
                 block_hashes: vec![ExternalBlockHash::Int(100)],
                 parent_block_hash: None,
                 token_ids: vec![1, 2, 3, 4],
@@ -703,6 +791,86 @@ mod tests {
         handle.shutdown();
     }
 
+    #[test]
+    fn native_integer_hash_capture_is_decodable_but_not_device_admissible() {
+        let bytes =
+            include_bytes!("../../tests/fixtures/kv_events_20261012/batch-legacy-integer.msgpack");
+        let batch = crate::kv_index::decode_batch(bytes).unwrap();
+        assert!(crate::kv_index::validate_device_batch(&batch, 128).is_err());
+    }
+
+    #[tokio::test]
+    async fn native_frames_reject_invalid_batch_without_advancing_watermark() {
+        let ctx = Arc::new(zmq::Context::new());
+        let socket = ctx.socket(zmq::PUB).unwrap();
+        let endpoint = format!("ipc:///tmp/kv-native-{}", std::process::id());
+        socket.bind(&endpoint).unwrap();
+        let indexer = Arc::new(KvBlockIndexer::new());
+        let (tx, mut rx) = mpsc::channel(64);
+        let source = SourceId::from("native-qwen3");
+        let handle = spawn(
+            EventSource {
+                source: source.clone(),
+                dp_rank: 0,
+                pub_endpoint: endpoint,
+                replay_endpoint: None,
+                topic: "kv".into(),
+                hwm: None,
+            },
+            indexer.clone(),
+            Some(tx),
+            ctx.clone(),
+        );
+        let bytes = include_bytes!("../../tests/fixtures/kv_events_20261012/batch-0.msgpack");
+        let batch = crate::kv_index::decode_batch(bytes).unwrap();
+        crate::kv_index::validate_device_batch(&batch, 128).unwrap();
+        let KVEvent::BlockStored(store) = &batch.events[0] else {
+            panic!("native store required")
+        };
+        let query = MatchQuery {
+            group_idx: 0,
+            local_hashes: local_hashes(&store.token_ids, 128, None)
+                .iter()
+                .map(|h| Arc::from(hex(h)))
+                .collect(),
+            tiers_of_interest: vec![StorageTier::Device],
+        };
+        publish_payload_until_advanced(&socket, &mut rx, b"kv", 0, bytes).await;
+        let before = indexer.find_matches(&query)[0].matched_depth;
+        assert_eq!(before as usize, store.block_hashes.len());
+        let bad = rmpv::Value::Array(vec![
+            1.0.into(),
+            rmpv::Value::Array(vec![rmpv::Value::Map(vec![
+                ("type".into(), "AllBlocksCleared".into()),
+                ("unknown".into(), true.into()),
+            ])]),
+            0.into(),
+        ]);
+        let mut payload = Vec::new();
+        rmpv::encode::write_value(&mut payload, &bad).unwrap();
+        socket
+            .send_multipart(
+                [b"kv".as_slice(), &1_i64.to_be_bytes(), payload.as_slice()],
+                0,
+            )
+            .unwrap();
+        let rejected = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            rejected,
+            IngestionSignal::Rejected { seq: Some(1), .. }
+        ));
+        assert_eq!(indexer.find_matches(&query)[0].matched_depth, before);
+        let bytes = include_bytes!("../../tests/fixtures/kv_events_20261012/batch-1.msgpack");
+        let good = crate::kv_index::decode_batch(bytes).unwrap();
+        crate::kv_index::validate_device_batch(&good, 128).unwrap();
+        publish_payload_until_advanced(&socket, &mut rx, b"kv", 1, bytes).await;
+        assert!(!indexer.find_matches(&query).is_empty());
+        handle.shutdown();
+    }
+
     async fn publish_until_advanced(
         pub_sock: &zmq::Socket,
         sig_rx: &mut mpsc::Receiver<IngestionSignal>,
@@ -712,11 +880,27 @@ mod tests {
         events: &[KVEvent],
         rank: Option<u32>,
     ) {
-        let payload = rmp_serde::to_vec(&(ts, events, &rank)).unwrap();
+        let payload = rmp_serde::to_vec_named(&(ts, events, &rank)).unwrap();
+        crate::kv_index::decode_batch(&payload)
+            .expect("publisher fixture must match native wire shape");
+        publish_payload_until_advanced(pub_sock, sig_rx, topic, seq, &payload).await;
+    }
+
+    async fn publish_payload_until_advanced(
+        pub_sock: &zmq::Socket,
+        sig_rx: &mut mpsc::Receiver<IngestionSignal>,
+        topic: &[u8],
+        seq: i64,
+        payload: &[u8],
+    ) {
         let seq_bytes = seq.to_be_bytes();
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
         loop {
-            let frames: Vec<&[u8]> = vec![topic, seq_bytes.as_slice(), payload.as_slice()];
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "subscriber never advanced to seq {seq}"
+            );
+            let frames: Vec<&[u8]> = vec![topic, seq_bytes.as_slice(), payload];
             pub_sock.send_multipart(frames, 0).unwrap();
             match tokio::time::timeout(Duration::from_millis(300), sig_rx.recv()).await {
                 Ok(Some(IngestionSignal::Advance { last_seq, .. })) if last_seq == seq => return,

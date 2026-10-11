@@ -1,0 +1,22 @@
+{
+  "source": "real Qwen3-8B Ascend NPU event publisher",
+  "vllm_commit": "ced6857afa0ea7b2e3f0846a62e1394e90f15607",
+  "vllm_ascend_commit": "4ea839b813fecbd1aba3affa63e3c896e75b123b",
+  "dp_rank": 0,
+  "block_size": 128,
+  "captures": {
+    "batch-0.msgpack": "native-kv-capture-v2.json/seq0",
+    "batch-1.msgpack": "native-kv-capture-v2.json/seq1",
+    "batch-legacy-integer.msgpack": "native-kv-capture-bind.json/seq0"
+  },
+  "accepted_contract": {
+    "prefix_caching_hash_algo": "sha256_cbor",
+    "VLLM_KV_EVENTS_USE_INT_BLOCK_HASHES": "0"
+  },
+  "sha256": {
+    "batch-legacy-integer.msgpack": "cc780145effede0288c11baf3f32956f61a024e6566588cfc404693a396d3b96",
+    "batch-0.msgpack": "9c1b988f91d07499f5e193c872a1f17ac4398293e6284b67eb193b44b793fe66",
+    "batch-1.msgpack": "06ab961e891626d05e7f07e19cfe4a57f423fa24e64bb8406b31f07480749472"
+  },
+  "scope": "CPU Rust replay of actual NPU frames; not live Router DP scheduling or measured physical reuse"
+}
