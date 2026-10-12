@@ -58,8 +58,7 @@ kubectl apply -f backend-services.yaml
 echo ""
 echo "Waiting for vLLM backends to be ready..."
 kubectl wait --for=condition=ready --timeout=600s \
-    pod -l llm-d.ai/role=decode -n "$NAMESPACE" 2>/dev/null || \
-    echo "Backend pods not ready yet, continuing..."
+    pod -l llm-d.ai/role=decode -n "$NAMESPACE"
 
 # Deploy vllm-router
 echo ""

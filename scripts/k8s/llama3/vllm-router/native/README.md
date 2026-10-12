@@ -15,16 +15,25 @@ Kubernetes deployment for Llama 3.1 8B with vllm-router handling native load bal
 ## Architecture
 
 ```
-Client → vllm-router → [Backend-0 (8 GPUs TP8), Backend-1 (8 GPUs TP8)]
+Client → vllm-router → [Pod-0:8200 (TP8/DP1), Pod-1:8200 (TP8/DP1)]
 ```
 
-Both backends handle full inference (prefill + decode). vllm-router distributes requests.
+Both backends handle full inference (prefill + decode). Kubernetes pod discovery
+registers each ready pod IP as a separate worker. Tensor parallel ranks cooperate
+inside one engine; each pod has one DP rank. The router does not expand a shared
+headless service name into fictitious DP workers.
 
 ## Prerequisites
 
 1. **Kubernetes Cluster** with 16 GPUs
 2. **Tools**: kubectl, helm, helmfile
 3. **HuggingFace Token**: Set as environment variable before deploying
+4. **Router image**: Replace the historical private image in
+   `router-deployment.yaml` with an accessible image built from the current
+   checkout, supporting `--service-discovery`. The YAML is not evidence that
+   this historical image was built or validated against the current CLI.
+5. **Image versions**: Pin the engine image and record its registry digest for
+   actual runs; the existing `latest` placeholder does not freeze a benchmark.
 
 ## Deployment Steps
 
@@ -53,10 +62,13 @@ cd scripts/k8s/llama3/vllm-router/native
 This single command deploys:
 - Namespace creation (if needed)
 - HuggingFace token secret (from HF_TOKEN environment variable)
-- 2 vLLM backend pods via helmfile (8 GPUs DP8 each)
+- 2 vLLM backend pods via helmfile (8 GPUs TP8 / DP1 each)
 - Backend Kubernetes Services (headless service for pod discovery)
 - vllm-router deployment
 - vllm-router service
+
+Backend readiness is required before the router manifests are applied. A timeout
+exits with an error instead of proceeding with unavailable model pods.
 
 ### 3. Verify Deployment
 
@@ -107,17 +119,50 @@ decode:
 
 ### router-deployment.yaml
 
-Router uses headless service with data-parallel-size for load balancing:
+Router watches ready backend pods in the deployment namespace and connects to
+their individual engine ports. The manifest includes a ServiceAccount and a
+namespace-scoped Role granting only `get`, `list`, and `watch` on pods:
 ```yaml
 command:
   - vllm-router
-  - --worker-urls
-  - http://ms-llama31-llm-d-modelservice-decode.vllm-router-llama31.svc.cluster.local:8000
+  - --service-discovery
+  - --service-discovery-namespace
+  - vllm-router-llama31
+  - --service-discovery-port
+  - "8200"
+  - --selector
+  - llm-d.ai/role=decode
+  - llm-d.ai/inferenceServing=true
   - --intra-node-data-parallel-size
-  - "8"
+  - "1"
 ```
 
-This configuration creates 8 logical workers (one per DP rank). The router establishes multiple HTTP connections (one per DP rank), and Kubernetes DNS round-robin distributes these connections across both backend pods.
+With two ready backend pods, this creates two workers, each addressing one
+TP8/DP1 engine. Pod replacement is handled through discovery rather than relying
+on HTTP connection pooling to randomly resolve a shared DNS name. Native traffic
+goes directly to port 8200; the headless service and routing sidecar are not used
+as worker identities in this path.
+
+The engine argument is `--tensor-parallel-size 8`. Its DP size defaults to 1.
+`--intra-node-data-parallel-size` is a router argument, not a vLLM engine argument.
+To experiment with TP1/DP8, change the chart, engine arguments and router DP size
+together, then validate each addressed rank; that is a different deployment.
+
+## Configuration Regression Checks
+
+```bash
+pip install -e '.[dev]'
+python -m pytest -q py_test/test_native_k8s_example.py
+bash -n scripts/k8s/llama3/vllm-router/native/deploy.sh
+```
+
+Run these commands from the repository root. The CPU tests check engine/chart
+parallelism, GPU allocation, pod-specific routing, read-only discovery RBAC, and
+failure when backend readiness times out using mocked command-line tools. They
+run in the existing Python CI suite. They do not deploy Kubernetes, allocate GPUs,
+or establish throughput and generation quality. Validate those separately with
+the benchmark and evaluation commands above and record the actual images,
+worker addresses, successful requests and model results.
 
 ## Monitoring
 
