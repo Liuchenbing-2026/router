@@ -1,4 +1,16 @@
-# Ascend tokenizer-cache backend integration
+# Native vLLM tokenizer-cache backend integration
+
+The backend uses vLLM's `--tokenizer-cache-gb` option. The paired Ascend
+`additional_config.tokenizer_cache_gb` is fixed at zero; it does not enable this
+native cache. Pin vLLM `b37f01391ec3b0c028ab6947e4ea3b6f7846504d` for the Ascend
+0.30 compatibility environment. Its segment-cache module is byte-identical to
+the implementation at `45a0e62f241dffeefdb701c4c1c60b874c1be373`. Full serving
+of that newer upstream-main base with the paired Ascend plugin fails at an
+incompatible private KV-cache import, so these versions are not interchangeable.
+
+The source-file contract is checked before launch. Cache activation and hits
+require runtime verification; matching files alone does not establish a gain.
+The native CLI budget is a backend startup option, never an OpenAI request field.
 
 | Delivery | Status |
 | --- | --- |
@@ -33,22 +45,22 @@ cost selection, and complete recovery need their own implementation and tests.
 | Item | Value |
 | --- | --- |
 | vLLM-Ascend source | 4ea839b813fecbd1aba3affa63e3c896e75b123b |
-| Paired vLLM reference | ced6857afa0ea7b2e3f0846a62e1394e90f15607 |
-| Cache option | additional_config.tokenizer_cache_gb; default 0 |
-| Local checks | Python 3.9.6, stdlib; no image or inference service used |
-| Hardware, throughput, quality | Not run |
-| Task branch | xxx_tokenizer_cache |
+| Paired vLLM reference | b37f01391ec3b0c028ab6947e4ea3b6f7846504d |
+| Cache option | --tokenizer-cache-gb; default 0; legacy additional-config budget 0 |
+| Local checks | Python 3.12.13; 11 offline helper tests passed |
+| Hardware, throughput, quality | Per-launcher bootstrap untested; compatibility-backend matrix tracked separately |
+| Task branch | native_tokenizer_cache_acceptance_20261013 |
 | Component base SHA | 91b65ee4bdfbe98863a32a2205dced5dbb249ffe |
 | Delivery SHA | Commit containing this example; inspect with git log -1 -- . |
 
 Install the paired sources in an Ascend environment with its compatible
 CANN, torch-npu and model dependencies. source_contract.json records fingerprints
-of the relevant installed patch/config/renderer files. The launcher verifies
+of the installed native config, renderer, and segment-cache files. The launcher verifies
 these files before execution. This detects this specific interface mismatch;
 it does not certify the complete environment or all model templates.
 
-Source: [Ascend frontend cache](https://github.com/vllm-project/vllm-ascend/pull/16298).
-The patch remains an unmerged dependency. Engine CLI arguments belong to the
+Source: [Native HF renderer cache](https://github.com/vllm-project/vllm/pull/61335).
+The native implementation remains an unmerged dependency. Engine CLI arguments belong to the
 backend startup command; do not insert them into an OpenAI request body.
 
 ## Commands
@@ -177,7 +189,7 @@ Agent tasks and include retries, failures, complete latency and total cost.
 | --- | --- |
 | This change | Repository-specific acceptance plan; no new production-routing implementation |
 | Existing software checks | Historical native/fixture results above; not a real model or NPU qualification |
-| Live acceptance | Pending; no hardware has been allocated for this plan |
+| Live acceptance | Single-NPU compatibility matrix in progress; full Agent / DP / P-D acceptance pending |
 | Release | Correctness → native ingress → fault recovery → isolated performance → full-task evaluation |
 
 先验收 **token ID 一致性**，再验收 **事件索引真实性**，最后验收 **任务收益**。三者不能互相替代。

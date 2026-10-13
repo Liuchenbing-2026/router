@@ -1,19 +1,19 @@
 {
-  "source_pr": "https://github.com/vllm-project/vllm-ascend/pull/16298",
-  "ascend_commit": "4ea839b813fecbd1aba3affa63e3c896e75b123b",
-  "vllm_commit": "ced6857afa0ea7b2e3f0846a62e1394e90f15607",
+  "source_pr": "https://github.com/vllm-project/vllm/pull/61335",
+  "implementation": "native vLLM HF renderer segment cache",
+  "vllm_commit": "b37f01391ec3b0c028ab6947e4ea3b6f7846504d",
+  "vllm_base": "f408c863ad572024a292e8fcb2abf7ccddcfe8be",
+  "algorithm_commit": "45a0e62f241dffeefdb701c4c1c60b874c1be373",
+  "paired_ascend_commit": "4ea839b813fecbd1aba3affa63e3c896e75b123b",
+  "native_option": "--tokenizer-cache-gb",
+  "legacy_additional_capacity_gb": 0,
   "package_files": {
-    "vllm_ascend": {
-      "ascend_config.py": "28476ca0433230b02a543a049fa969d33c06d34edb0d6e8f544405341d898d8d",
-      "patch/__init__.py": "da3ad3ad7448bfae336b1cd0eec43a7d181ce636f30ae20da9f99f763a218711",
-      "patch/platform/__init__.py": "c73a6da53587ff136f75ffe66b461d1e71b73249d67350b4d92d468e8cdc0ed6",
-      "patch/platform/patch_tokenizer_cache.py": "3ff3c2aa6b21efeb3b8851c6ef9c6f42eba0399f4c0a5ea2c22d5ed6071efa04"
-    },
     "vllm": {
-      "renderers/base.py": "4db44560f4d331bf0f184626ed7cac97b350355a5c64bce648bf1fa971b16d68",
-      "renderers/hf.py": "9cec4d72b0a7464138216791499a2de25adb8edc0fe9a1cd5bd2d6a837ee384c",
-      "renderers/deepseek_v4.py": "b989ea4b4240df0f5eeb832942d1aaa8e72e56743b45186b1b6145d7e7bbbd3a",
-      "renderers/deepseek_v32.py": "538f6b2b2db0e0e013318e7ebca7b46c084b865cc7658c76fd499f9bf5ecd85c"
+      "config/model.py": "07e223cc7d938fa1a7cfcbd596bdac75c37d779b100600303e740165a777395d",
+      "engine/arg_utils.py": "c799f69ec20120d807d2fd707b170de418664cea14d6a06793263ced8f19bfb4",
+      "renderers/base.py": "6dbd229c123497fd51ecd8629828977f4fb6978dfb93c06f41182f15103dabc1",
+      "renderers/hf.py": "cd8e40741ceb49b011c8d3fc9de71923ad6aac6f97b71726fb5dd356b8d07468",
+      "tokenizers/segment_cache.py": "1205ab51285440bddd16661aa14e32d3cbf78517aa73880fb3a9b05e58f48f8e"
     }
   }
 }

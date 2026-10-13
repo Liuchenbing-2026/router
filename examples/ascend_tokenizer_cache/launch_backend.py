@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
-"""Launch the pinned Ascend backend with an explicit tokenizer-cache budget."""
+"""Launch a pinned vLLM native cache while disabling the paired legacy cache."""
 
 import argparse
 import hashlib
@@ -60,6 +60,8 @@ def parse_command(argv):
     reserved = (
         "--additional-config",
         "--additional_config",
+        "--tokenizer-cache-gb",
+        "--tokenizer_cache_gb",
         "--model",
         "--host",
         "--port",
@@ -72,7 +74,7 @@ def parse_command(argv):
         )
     if extra and not extra[0].startswith("--"):
         parser.error("server args must start with an option")
-    config["tokenizer_cache_gb"] = args.cache_gb
+    config["tokenizer_cache_gb"] = 0
     command = [
         sys.executable,
         "-m",
@@ -83,6 +85,8 @@ def parse_command(argv):
         args.host,
         "--port",
         str(args.port),
+        "--tokenizer-cache-gb",
+        str(args.cache_gb),
         "--additional-config",
         json.dumps(config, separators=(",", ":")),
     ]

@@ -57,8 +57,11 @@ class ExampleTests(unittest.TestCase):
                 config,
                 {
                     "kv_transfer_config": {"role": "prefill"},
-                    "tokenizer_cache_gb": budget,
+                    "tokenizer_cache_gb": 0,
                 },
+            )
+            self.assertEqual(
+                float(command[command.index("--tokenizer-cache-gb") + 1]), budget
             )
             self.assertEqual(command[-2:], ["--tensor-parallel-size", "2"])
             self.assertTrue(args.dry_run)
@@ -71,6 +74,8 @@ class ExampleTests(unittest.TestCase):
             ["--additional-config", "[]"],
             ["--additional-config", '{"tokenizer_cache_gb":4}'],
             ["--", "--additional-config={}"],
+            ["--", "--tokenizer-cache-gb=8"],
+            ["--", "--tokenizer_cache_gb", "8"],
             ["--port", "0"],
             ["--", "--additional-config.tokenizer_cache_gb=8"],
         ):
