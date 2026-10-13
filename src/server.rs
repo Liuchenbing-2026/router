@@ -417,6 +417,32 @@ async fn v1_responses_list_input_items(
 const AUTH_FAILURE_MESSAGE: &str =
     "You must provide a valid API key. Obtain one from http://helmholtz.cloud";
 
+/// Extract the client credential from request headers.
+///
+/// OpenAI-style callers send `Authorization: Bearer <token>`; native Anthropic
+/// Messages (`/v1/messages`) callers send the credential in `x-api-key`
+/// instead. Both are accepted so an Anthropic client authenticates against the
+/// router exactly as it does against vLLM. When both are present the
+/// `Authorization` header wins.
+fn api_token_from_headers(headers: &http::HeaderMap) -> Option<String> {
+    let bearer = headers
+        .get(http::header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+
+    bearer.or_else(|| {
+        headers
+            .get("x-api-key")
+            .and_then(|value| value.to_str().ok())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+    })
+}
+
 // ---------- Worker management endpoints (Legacy) ----------
 
 #[derive(Deserialize)]
@@ -433,18 +459,17 @@ async fn authorize_request(
         return Ok(());
     }
 
-    let auth_header = headers
-        .get(http::header::AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or_default();
-
-    let token = auth_header
-        .strip_prefix("Bearer ")
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
+    let token = api_token_from_headers(headers)
         .ok_or_else(|| (StatusCode::UNAUTHORIZED, AUTH_FAILURE_MESSAGE).into_response())?;
 
-    if let Some(valid) = state.context.api_key_cache.read().await.get(token).copied() {
+    if let Some(valid) = state
+        .context
+        .api_key_cache
+        .read()
+        .await
+        .get(token.as_str())
+        .copied()
+    {
         if valid {
             return Ok(());
         }
@@ -479,7 +504,7 @@ async fn authorize_request(
         .api_key_cache
         .write()
         .await
-        .insert(token.to_string(), validated);
+        .insert(token, validated);
 
     if validated {
         Ok(())
@@ -1285,5 +1310,36 @@ mod tests {
         let (accepted, _) = listener.accept().await;
 
         assert!(accepted.nodelay().unwrap());
+    }
+
+    #[test]
+    fn api_token_prefers_bearer_and_falls_back_to_x_api_key() {
+        let mut headers = http::HeaderMap::new();
+        assert_eq!(api_token_from_headers(&headers), None);
+
+        headers.insert("x-api-key", "anthropic-key".parse().unwrap());
+        assert_eq!(
+            api_token_from_headers(&headers),
+            Some("anthropic-key".to_string())
+        );
+
+        headers.insert(
+            http::header::AUTHORIZATION,
+            "Bearer openai-key".parse().unwrap(),
+        );
+        assert_eq!(
+            api_token_from_headers(&headers),
+            Some("openai-key".to_string())
+        );
+    }
+
+    #[test]
+    fn api_token_ignores_blank_credentials() {
+        let mut headers = http::HeaderMap::new();
+        headers.insert("x-api-key", "   ".parse().unwrap());
+        assert_eq!(api_token_from_headers(&headers), None);
+
+        headers.insert(http::header::AUTHORIZATION, "Bearer ".parse().unwrap());
+        assert_eq!(api_token_from_headers(&headers), None);
     }
 }
