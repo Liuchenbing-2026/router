@@ -3,6 +3,7 @@
 pub mod discovery;
 pub mod indexer;
 pub mod subscriber;
+pub mod trust;
 pub mod types;
 pub mod wire;
 
