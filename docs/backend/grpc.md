@@ -31,8 +31,8 @@ name. `--health-check-endpoint` only applies to HTTP workers.
 `VLLM_ROUTER_TOKENIZER`, then `VLLM_ROUTER_MODEL`, then the request `model`.
 The request `model` remains the protobuf model name sent to the worker.
 
-The lowering in `src/backend/vllm_frontend.rs` tracks vLLM 0.29's private
-`prepare_chat_request` conversion. Replace the local adapter if vLLM exposes a
+The lowering in `src/backend/vllm_frontend.rs` tracks the paired vLLM Rust
+library's private `prepare_chat_request` conversion. Replace the local adapter if vLLM exposes a
 public frontend-only lowering API.
 
 Omitted temperature is resolved from the loaded model's `generation_config.json`
@@ -40,6 +40,27 @@ and then falls back to OpenAI's `1.0`; protobuf omission is not used because
 vLLM 0.29 gRPC rewrites it to greedy `0.0`. When hidden stop strings/tokens are
 configured, the router requests worker text so exact character trimming is
 preserved.
+
+### Model-specific roles
+
+Custom text roles are passed to the selected model's renderer rather than
+rejected during request lowering. HF templates receive the original role and
+additional JSON message fields, including nested objects and arrays. Text-only
+content parts are concatenated, consistently with standard text messages.
+`developer` uses the library's standard developer message type.
+
+The DeepSeek V4/V4.1 native renderers accept `latest_reminder`. Native renderers
+still reject custom roles they cannot represent; support depends on the model
+renderer. Invalid or multimodal custom content fails before worker dispatch.
+Custom metadata affects the rendered prompt, so different rendered inputs do
+not share an L0 cache entry.
+
+These frontend crates currently use an unreleased, fixed workspace revision:
+[`d27c04501e15e8a0b314d4f1f03fd325555d8ea0`](https://github.com/Liuchenbing-2026/vllm/commit/d27c04501e15e8a0b314d4f1f03fd325555d8ea0).
+All three dependencies in `Cargo.toml` must stay on that revision. This is a
+temporary fork dependency providing custom metadata and native reminder
+rendering; it should move to an upstream revision containing those capabilities
+before release. It does not change the worker protobuf protocol.
 
 ## Optional L0 encoding cache
 
@@ -157,6 +178,7 @@ Always-on tests:
 
 ```bash
 cargo test --test grpc_vs_http_e2e
+cargo test --test grpc_custom_roles
 cargo test --lib backend::
 python3 -m unittest tests/test_bench_prefix_kvhit.py
 ```

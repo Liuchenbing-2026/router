@@ -21,7 +21,7 @@ use crate::protocols::spec::{
 };
 use vllm_chat::{
     AssistantContentBlock, AssistantToolCall, ChatTool, ChatToolChoice,
-    ReasoningEffort as VllmReasoningEffort,
+    EffortValue as VllmReasoningEffort,
 };
 
 #[derive(Clone)]
@@ -366,15 +366,33 @@ fn spec_messages_to_upstream(
                     ));
                 }
                 SpecChatMessage::Other(value) => {
-                    // HTTP backends can forward unknown roles verbatim, but vllm-chat
-                    // cannot represent them, so the gRPC frontend rejects them.
                     let role = value
                         .get("role")
                         .and_then(serde_json::Value::as_str)
-                        .expect("ChatMessage::Other must contain a string `role`");
-                    return Err(anyhow!(
-                        "chat message role `{role}` is not supported by the router gRPC frontend"
-                    ));
+                        .ok_or_else(|| anyhow!("chat message role must be a string"))?;
+                    let content = value.get("content").ok_or_else(|| {
+                        anyhow!("chat message role `{role}` requires content on the gRPC path")
+                    })?;
+                    let content: UserMessageContent = serde_json::from_value(content.clone())
+                        .map_err(|error| {
+                            anyhow!("chat message role `{role}` has invalid content: {error}")
+                        })?;
+                    let text = user_content_text(&content)?;
+                    if role == "developer" {
+                        super::vllm_frontend::UpstreamChatMessage::developer(text, None)
+                    } else {
+                        let mut extra_fields = value
+                            .as_object()
+                            .ok_or_else(|| anyhow!("custom chat message must be an object"))?
+                            .clone();
+                        extra_fields.remove("role");
+                        extra_fields.remove("content");
+                        super::vllm_frontend::UpstreamChatMessage::custom_with_extra_fields(
+                            role,
+                            text,
+                            extra_fields,
+                        )?
+                    }
                 }
             })
         })
@@ -396,6 +414,7 @@ fn spec_tools_to_upstream(request: &ChatCompletionRequest) -> Result<Vec<ChatToo
                 description: tool.function.description.clone(),
                 parameters: tool.function.parameters.clone(),
                 strict: None,
+                defer_loading: None,
             })
         })
         .collect()
@@ -581,8 +600,8 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unknown_roles_on_grpc_path() {
-        for role in ["latest_reminder", "developer"] {
+    fn preserves_custom_and_developer_roles_on_grpc_path() {
+        for role in ["latest_reminder", "developer", "checkpoint"] {
             let request: ChatCompletionRequest = serde_json::from_value(serde_json::json!({
                 "messages": [{
                     "role": role,
@@ -591,10 +610,11 @@ mod tests {
             }))
             .unwrap();
 
-            let error = spec_messages_to_upstream(&request.messages).unwrap_err();
+            let messages = spec_messages_to_upstream(&request.messages).unwrap();
+            assert_eq!(messages[0].role().as_str(), role);
             assert_eq!(
-                error.to_string(),
-                format!("chat message role `{role}` is not supported by the router gRPC frontend")
+                messages[0].text_content().unwrap(),
+                "Model-specific instructions."
             );
         }
     }
