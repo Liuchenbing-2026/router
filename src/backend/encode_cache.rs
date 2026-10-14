@@ -19,7 +19,12 @@ pub(crate) struct EncodingKey {
     text: String,
 }
 
-pub(crate) type FrontendCache = EncodeCache<EncodingKey, Vec<u32>>;
+/// L0 stores the token IDs behind an [`Arc`] so a hit hands the caller the
+/// same allocation instead of copying it. See the `PreparedChat` hand-off in
+/// [`crate::backend::preprocess`]: the ids travel straight into
+/// [`crate::backend::frontend::PreparedChat`] without a `Vec` -> `Arc<[u32]>`
+/// copy on the hit path.
+pub(crate) type FrontendCache = EncodeCache<EncodingKey, Arc<[u32]>>;
 
 #[derive(Clone)]
 pub(crate) struct PromptEncoder {
@@ -53,13 +58,16 @@ impl PromptEncoder {
         prompt: Prompt,
         add_special_tokens: bool,
         cache_salt: Option<&str>,
-    ) -> vllm_tokenizer::Result<Vec<u32>> {
+    ) -> vllm_tokenizer::Result<Arc<[u32]>> {
         let text = match prompt {
-            Prompt::TokenIds(ids) => return Ok(ids),
+            Prompt::TokenIds(ids) => return Ok(Arc::from(ids)),
             Prompt::Text(text) => text,
         };
         let Some(cache) = &self.cache else {
-            return self.tokenizer.encode(&text, add_special_tokens);
+            return self
+                .tokenizer
+                .encode(&text, add_special_tokens)
+                .map(Arc::from);
         };
         let key = EncodingKey {
             instance: self.instance,
@@ -69,12 +77,16 @@ impl PromptEncoder {
         };
         cache.get_or_encode(
             &key,
-            || self.tokenizer.encode(&key.text, add_special_tokens),
+            || {
+                self.tokenizer
+                    .encode(&key.text, add_special_tokens)
+                    .map(Arc::from)
+            },
             |ids| {
-                let bytes = entry_overhead_bytes::<EncodingKey, Vec<u32>>()
+                let bytes = entry_overhead_bytes::<EncodingKey, Arc<[u32]>>()
                     + key.text.len()
                     + key.cache_salt.as_ref().map_or(0, String::len)
-                    + size_of::<Vec<u32>>()
+                    + size_of::<Arc<[u32]>>()
                     + ids.len() * size_of::<u32>();
                 if bytes > cache.config().max_entry_bytes {
                     self.oversized_warning.call_once(|| {
@@ -193,7 +205,7 @@ mod tests {
         }
     }
 
-    fn encode(encoder: &PromptEncoder, text: &str, special: bool) -> Vec<u32> {
+    fn encode(encoder: &PromptEncoder, text: &str, special: bool) -> Arc<[u32]> {
         encoder
             .encode(Prompt::Text(text.into()), special, None)
             .unwrap()
@@ -289,17 +301,56 @@ mod tests {
             assert!(encoder
                 .encode(Prompt::Text("fail".into()), false, None)
                 .is_err());
-            assert_eq!(
-                encoder
-                    .encode(Prompt::TokenIds(vec![5, 4, 3]), true, Some("tenant-a"))
-                    .unwrap(),
-                [5, 4, 3]
-            );
+            let ids = encoder
+                .encode(Prompt::TokenIds(vec![5, 4, 3]), true, Some("tenant-a"))
+                .unwrap();
+            assert_eq!(ids.as_ref(), &[5, 4, 3][..]);
         }
         assert_eq!(inner.calls.load(Ordering::Relaxed), 2);
         assert_eq!(cache.stats().misses, 2);
         assert_eq!(cache.stats().entries, 0);
         assert_eq!(cache.stats().bytes, 0);
+    }
+
+    /// #359: an L0 hit hands the caller the cached allocation instead of
+    /// copying it, and a clone taken out before eviction stays valid.
+    #[test]
+    fn hits_reuse_the_cached_allocation_and_survive_eviction() {
+        let config = TokenizerCacheConfig {
+            max_entries: 1,
+            ..Default::default()
+        };
+        let cache = Arc::new(FrontendCache::new(config).unwrap());
+        let inner = CountingTokenizer::new(7);
+        let encoder = PromptEncoder::new("test-model", inner.clone(), Some(cache.clone()));
+        let expected = encode(
+            &PromptEncoder::new("test-model", CountingTokenizer::new(7), None),
+            "shared",
+            false,
+        );
+
+        // Miss, then hit: both must return the same allocation, so a hit costs
+        // a refcount bump rather than a `Vec` copy.
+        let first = encode(&encoder, "shared", false);
+        let second = encode(&encoder, "shared", false);
+        assert_eq!(&*first, &*expected);
+        assert!(Arc::ptr_eq(&first, &second), "a hit copied the token IDs");
+        assert_eq!(inner.calls.load(Ordering::Relaxed), 1);
+        assert_eq!(cache.stats().hits, 1);
+
+        // Evict "shared" (max_entries = 1) while a clone is still in flight.
+        // The clone must keep its allocation alive after the entry is dropped.
+        let held = first.clone();
+        encode(&encoder, "other", false);
+        assert_eq!(cache.stats().entries, 1);
+        assert!(cache.stats().evictions >= 1);
+        assert_eq!(
+            &*held, &*expected,
+            "eviction invalidated an in-flight clone"
+        );
+        let decoded_held = encoder.tokenizer.decode(held.as_ref(), false).unwrap();
+        let decoded_expected = encoder.tokenizer.decode(expected.as_ref(), false).unwrap();
+        assert_eq!(decoded_held, decoded_expected);
     }
 
     #[test]
@@ -363,7 +414,8 @@ mod tests {
                 scope.spawn(move || {
                     for i in 0..100 {
                         let text = format!("Hello {}", i % 8);
-                        let expected = encoder.tokenizer.encode(&text, false).unwrap();
+                        let expected: Arc<[u32]> =
+                            Arc::from(encoder.tokenizer.encode(&text, false).unwrap());
                         assert_eq!(encode(&encoder, &text, false), expected);
                     }
                 });

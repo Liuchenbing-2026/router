@@ -291,7 +291,9 @@ fn tokenize_vllm(request: &ChatCompletionRequest, frontend: &VllmFrontend) -> Re
         return Err(anyhow!("vllm-chat produced empty token_ids"));
     }
     Ok(TokenizeOut {
-        token_ids: Arc::from(token_ids),
+        // `chat_tokenize_timed` already returns an `Arc<[u32]>`; an L0 hit
+        // shares the cached allocation, so this is a refcount move, not a copy.
+        token_ids,
         adapt_ms,
         template_ms,
         encode_ms,

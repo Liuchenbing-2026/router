@@ -142,6 +142,11 @@ name = "otel_disabled_path"
 harness = false
 path = "benches/otel_disabled_path.rs"
 
+[[bench]]
+name = "l0_arc_handoff"
+harness = false
+path = "benches/l0_arc_handoff.rs"
+
 [profile.release]
 lto = "thin"
 codegen-units = 1
