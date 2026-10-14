@@ -8,8 +8,8 @@ use anyhow::{bail, Result};
 use serde_json::Value;
 use vllm_chat::{
     load_model_backends, ChatContent, ChatMessage, ChatOptions, ChatRequest, ChatRole, ChatTool,
-    ChatToolChoice, GenerationPromptMode, LoadModelBackendsOptions, LoadedModelBackends,
-    ReasoningEffort, ResolvedToolContext, SamplingParams,
+    ChatToolChoice, EffortValue, GenerationPromptMode, LoadModelBackendsOptions,
+    LoadedModelBackends, ResolvedToolContext, SamplingParams,
 };
 use vllm_text::TextDecodeOptions;
 
@@ -105,7 +105,7 @@ pub struct OpenAiChatRequest {
     pub tools: Vec<ChatTool>,
     pub tool_choice: Option<ChatToolChoice>,
     pub parallel_tool_calls: bool,
-    pub reasoning_effort: Option<ReasoningEffort>,
+    pub reasoning_effort: Option<EffortValue>,
     pub response_format: Option<Value>,
     pub add_special_tokens: bool,
     pub documents: Option<Vec<Value>>,
@@ -196,7 +196,7 @@ pub fn emit_detok(
     for &id in token_ids {
         decoder.push_token(id)?;
         if let Some(chunk) = decoder.next_chunk() {
-            out.push_str(&chunk);
+            out.push_str(&chunk.text);
         }
     }
     Ok(out)

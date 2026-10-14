@@ -99,9 +99,12 @@ vllm-proto = "0.2"
 # Rust crates in the vLLM tree (not pip). Unpublished on crates.io; Cargo
 # finds the package by name under rust/src/. Override with a path patch
 # to a local checkout if you already have the rust workspace.
-vllm-chat = { git = "https://github.com/vllm-project/vllm", tag = "v0.29.0" }
-vllm-tokenizer = { git = "https://github.com/vllm-project/vllm", tag = "v0.29.0" }
-vllm-text = { git = "https://github.com/vllm-project/vllm", tag = "v0.29.0" }
+# Integration pin for router #318: Custom messages plus the DeepSeek
+# latest_reminder fix from upstream PR #61446 (not yet merged).
+# Replace with an upstream release/revision containing that fix before release.
+vllm-chat = { git = "https://github.com/vllm-project/vllm", rev = "8bbb174bc8a3cddffb6be19e7844009f742f76ce" }
+vllm-tokenizer = { git = "https://github.com/vllm-project/vllm", rev = "8bbb174bc8a3cddffb6be19e7844009f742f76ce" }
+vllm-text = { git = "https://github.com/vllm-project/vllm", rev = "8bbb174bc8a3cddffb6be19e7844009f742f76ce" }
 
 [dev-dependencies]
 libc = "0.2"

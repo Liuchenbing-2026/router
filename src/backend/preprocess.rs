@@ -21,7 +21,7 @@ use crate::protocols::spec::{
 };
 use vllm_chat::{
     AssistantContentBlock, AssistantToolCall, ChatTool, ChatToolChoice,
-    ReasoningEffort as VllmReasoningEffort,
+    EffortValue as VllmReasoningEffort,
 };
 
 #[derive(Clone)]
@@ -365,20 +365,77 @@ fn spec_messages_to_upstream(
                         "legacy function messages are not supported by vllm-chat"
                     ));
                 }
-                SpecChatMessage::Other(value) => {
-                    // HTTP backends can forward unknown roles verbatim, but vllm-chat
-                    // cannot represent them, so the gRPC frontend rejects them.
-                    let role = value
-                        .get("role")
-                        .and_then(serde_json::Value::as_str)
-                        .expect("ChatMessage::Other must contain a string `role`");
-                    return Err(anyhow!(
-                        "chat message role `{role}` is not supported by the router gRPC frontend"
-                    ));
-                }
+                SpecChatMessage::Other(value) => other_message_to_upstream(value)?,
             })
         })
         .collect()
+}
+
+fn other_message_to_upstream(
+    value: &serde_json::Value,
+) -> Result<super::vllm_frontend::UpstreamChatMessage> {
+    use super::vllm_frontend::UpstreamChatMessage;
+
+    let object = value
+        .as_object()
+        .ok_or_else(|| anyhow!("custom chat message must be an object"))?;
+    let role = object
+        .get("role")
+        .and_then(serde_json::Value::as_str)
+        .filter(|role| !role.is_empty())
+        .ok_or_else(|| anyhow!("custom chat message role must be a non-empty string"))?;
+
+    // vllm-chat's Custom variant carries role and content, not arbitrary JSON.
+    // Never silently discard fields that could affect the rendered prompt.
+    for key in object.keys() {
+        if key != "role" && key != "content" {
+            return Err(anyhow!(
+                "chat message role `{role}` field `{key}` cannot be represented by the router gRPC frontend"
+            ));
+        }
+    }
+    let content = object
+        .get("content")
+        .ok_or_else(|| anyhow!("chat message role `{role}` requires content"))?;
+    let content = custom_text_content(content, role)?;
+
+    // `developer` is known to vllm-chat, but is an Other variant in our HTTP DTO.
+    // Preserve its native rendering semantics instead of lowering it as Custom.
+    Ok(if role == "developer" {
+        UpstreamChatMessage::developer(content, None)
+    } else {
+        UpstreamChatMessage::custom(role, content)
+    })
+}
+
+fn custom_text_content(value: &serde_json::Value, role: &str) -> Result<vllm_chat::ChatContent> {
+    if let Some(text) = value.as_str() {
+        return Ok(vllm_chat::ChatContent::Text(text.to_owned()));
+    }
+    let parts = value.as_array().ok_or_else(|| {
+        anyhow!("chat message role `{role}` content must be a string or text-part array")
+    })?;
+    let mut content = Vec::with_capacity(parts.len());
+    for part in parts {
+        let part = part
+            .as_object()
+            .ok_or_else(|| anyhow!("invalid text content part"))?;
+        if part.get("type").and_then(serde_json::Value::as_str) != Some("text") {
+            return Err(anyhow!(
+                "only text content parts are supported by the token_ids-only gRPC path"
+            ));
+        }
+        if part.keys().any(|key| key != "type" && key != "text") {
+            return Err(anyhow!("extension fields on text content parts are not supported by the router gRPC frontend"));
+        }
+        let text = part
+            .get("text")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| anyhow!("text content part requires a string `text`"))?;
+        content.push(vllm_chat::ChatContentPart::text(text));
+    }
+    // Keep boundaries: native renderers may insert separators between parts.
+    Ok(vllm_chat::ChatContent::Parts(content))
 }
 
 fn spec_tools_to_upstream(request: &ChatCompletionRequest) -> Result<Vec<ChatTool>> {
@@ -396,6 +453,7 @@ fn spec_tools_to_upstream(request: &ChatCompletionRequest) -> Result<Vec<ChatToo
                 description: tool.function.description.clone(),
                 parameters: tool.function.parameters.clone(),
                 strict: None,
+                defer_loading: None,
             })
         })
         .collect()
@@ -581,8 +639,8 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unknown_roles_on_grpc_path() {
-        for role in ["latest_reminder", "developer"] {
+    fn preserves_custom_roles_on_grpc_path() {
+        for role in ["latest_reminder", "root", "model_specific"] {
             let request: ChatCompletionRequest = serde_json::from_value(serde_json::json!({
                 "messages": [{
                     "role": role,
@@ -591,10 +649,81 @@ mod tests {
             }))
             .unwrap();
 
-            let error = spec_messages_to_upstream(&request.messages).unwrap_err();
+            let messages = spec_messages_to_upstream(&request.messages).unwrap();
+            assert!(
+                matches!(&messages[0], vllm_chat::ChatMessage::Custom {role: actual, ..} if actual == role)
+            );
             assert_eq!(
-                error.to_string(),
-                format!("chat message role `{role}` is not supported by the router gRPC frontend")
+                messages[0].text_content().unwrap(),
+                "Model-specific instructions."
+            );
+        }
+    }
+
+    #[test]
+    fn developer_uses_native_variant() {
+        let message = other_message_to_upstream(&serde_json::json!({
+            "role": "developer", "content": "Follow these instructions"
+        }))
+        .unwrap();
+        assert!(matches!(message, vllm_chat::ChatMessage::Developer { .. }));
+    }
+
+    #[test]
+    fn custom_roles_preserve_text_part_boundaries() {
+        let message = other_message_to_upstream(&serde_json::json!({
+            "role": "latest_reminder", "content": [
+                {"type": "text", "text": "First 世界"},
+                {"type": "text", "text": "Second"}
+            ]
+        }))
+        .unwrap();
+        let vllm_chat::ChatMessage::Custom {
+            content: vllm_chat::ChatContent::Parts(parts),
+            ..
+        } = message
+        else {
+            panic!("expected custom message with text parts");
+        };
+        assert_eq!(
+            parts,
+            vec![
+                vllm_chat::ChatContentPart::text("First 世界"),
+                vllm_chat::ChatContentPart::text("Second")
+            ]
+        );
+    }
+
+    #[test]
+    fn custom_roles_reject_unrepresentable_extensions() {
+        for key in ["name", "tool_calls", "metadata", "tools"] {
+            let mut value = serde_json::json!({"role": "root", "content": "hello"});
+            value[key] = serde_json::json!({"important": true});
+            let error = other_message_to_upstream(&value).unwrap_err().to_string();
+            assert!(
+                error.contains(key) && error.contains("cannot be represented"),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_custom_messages_are_errors_not_panics() {
+        for value in [
+            serde_json::json!(null),
+            serde_json::json!({"content": "hello"}),
+            serde_json::json!({"role": 1, "content": "hello"}),
+            serde_json::json!({"role": "", "content": "hello"}),
+            serde_json::json!({"role": "root"}),
+            serde_json::json!({"role": "root", "content": null}),
+            serde_json::json!({"role": "root", "content": 42}),
+            serde_json::json!({"role": "root", "content": [{"type":"text"}]}),
+            serde_json::json!({"role": "root", "content": [{"type":"text","text":"hello","extra":true}]}),
+            serde_json::json!({"role": "root", "content": [{"type":"image_url","image_url":{"url":"data:image/png;base64,AA"}}]}),
+        ] {
+            assert!(
+                spec_messages_to_upstream(&[SpecChatMessage::Other(value.clone())]).is_err(),
+                "{value}"
             );
         }
     }
