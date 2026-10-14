@@ -2509,3 +2509,214 @@ mod rerank_tests {
         ctx.shutdown().await;
     }
 }
+
+/// Anthropic Messages API (`/v1/messages`) compatibility.
+///
+/// Claude Code / Anthropic SDK clients authenticate with `x-api-key` and send
+/// a mandatory `anthropic-version` header. The router must accept that
+/// credential and keep the protocol header intact on the way to the worker.
+#[cfg(test)]
+mod anthropic_messages_tests {
+    use super::common;
+    use axum::body::Body;
+    use axum::extract::Request;
+    use axum::http::{header::CONTENT_TYPE, StatusCode};
+    use common::mock_worker::{
+        clear_captured_requests, get_captured_requests, HealthStatus, MockWorker, MockWorkerConfig,
+        WorkerType,
+    };
+    use reqwest::Client;
+    use serde_json::json;
+    use std::sync::Arc;
+    use tower::ServiceExt;
+    use vllm_router_rs::config::{
+        CircuitBreakerConfig, ConnectionMode, PolicyConfig, RetryConfig, RouterConfig, RoutingMode,
+    };
+    use vllm_router_rs::routers::{RouterFactory, RouterTrait};
+
+    fn make_config(worker_urls: Vec<String>, api_key: Option<String>) -> RouterConfig {
+        RouterConfig {
+            mode: RoutingMode::Regular { worker_urls },
+            policy: PolicyConfig::RoundRobin,
+            host: "127.0.0.1".to_string(),
+            port: 0,
+            max_payload_size: 256 * 1024 * 1024,
+            request_timeout_secs: 10,
+            worker_startup_timeout_secs: 5,
+            worker_startup_check_interval_secs: 1,
+            intra_node_data_parallel_size: 1,
+            api_key,
+            api_key_validation_urls: vec![],
+            discovery: None,
+            metrics: None,
+            log_dir: None,
+            log_level: None,
+            request_id_headers: None,
+            max_concurrent_requests: 64,
+            queue_size: 0,
+            queue_timeout_secs: 60,
+            rate_limit_tokens_per_second: None,
+            cors_allowed_origins: vec![],
+            retry: RetryConfig::default(),
+            circuit_breaker: CircuitBreakerConfig::default(),
+            disable_retries: false,
+            disable_circuit_breaker: false,
+            health_check: vllm_router_rs::config::HealthCheckConfig::default(),
+            enable_igw: false,
+            connection_mode: ConnectionMode::Http,
+            history_backend: vllm_router_rs::config::HistoryBackend::Memory,
+            enable_profiling: false,
+            profile_timeout_secs: 30,
+            epd: None,
+            kv_connector: vllm_router_rs::config::KvConnector::Nixl,
+            program_scheduling: None,
+        }
+    }
+
+    async fn start_worker() -> (MockWorker, String, u16) {
+        let mut worker = MockWorker::new(MockWorkerConfig {
+            port: 0,
+            worker_type: WorkerType::Regular,
+            health_status: HealthStatus::Healthy,
+            response_delay_ms: 0,
+            fail_rate: 0.0,
+        });
+        let url = worker.start().await.unwrap();
+        let port: u16 = url.split(':').next_back().unwrap().parse().unwrap();
+        clear_captured_requests(port);
+        (worker, url, port)
+    }
+
+    fn messages_payload() -> serde_json::Value {
+        json!({
+            "model": "mock-model",
+            "max_tokens": 32,
+            "messages": [{"role": "user", "content": "hello"}]
+        })
+    }
+
+    #[tokio::test]
+    async fn test_v1_messages_returns_anthropic_response() {
+        let (_worker, url, _port) = start_worker().await;
+
+        let config = make_config(vec![url], None);
+        let app_context = common::create_test_context(config.clone());
+        let router: Arc<dyn RouterTrait> =
+            Arc::from(RouterFactory::create_router(&app_context).await.unwrap());
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+        let app = common::test_app::create_test_app(router, Client::new(), &config);
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/v1/messages")
+            .header(CONTENT_TYPE, "application/json")
+            .header("anthropic-version", "2023-06-01")
+            .body(Body::from(
+                serde_json::to_string(&messages_payload()).unwrap(),
+            ))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body_json["type"], "message");
+        assert_eq!(body_json["role"], "assistant");
+        assert_eq!(body_json["content"][0]["type"], "text");
+    }
+
+    #[tokio::test]
+    async fn test_v1_messages_forwards_anthropic_version() {
+        let (_worker, url, port) = start_worker().await;
+
+        let config = make_config(vec![url], None);
+        let app_context = common::create_test_context(config.clone());
+        let router: Arc<dyn RouterTrait> =
+            Arc::from(RouterFactory::create_router(&app_context).await.unwrap());
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+        let app = common::test_app::create_test_app(router, Client::new(), &config);
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/v1/messages")
+            .header(CONTENT_TYPE, "application/json")
+            .header("anthropic-version", "2023-06-01")
+            .header("anthropic-beta", "prompt-caching-2024-07-31")
+            .body(Body::from(
+                serde_json::to_string(&messages_payload()).unwrap(),
+            ))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let captured = get_captured_requests(port);
+        let messages_request = captured
+            .iter()
+            .find(|r| r.path == "/v1/messages")
+            .expect("worker should have received a /v1/messages request");
+        assert_eq!(
+            messages_request
+                .headers
+                .get("anthropic-version")
+                .and_then(|v| v.first())
+                .map(String::as_str),
+            Some("2023-06-01"),
+            "anthropic-version must reach the worker; dropping it breaks Anthropic SDK clients"
+        );
+        assert_eq!(
+            messages_request
+                .headers
+                .get("anthropic-beta")
+                .and_then(|v| v.first())
+                .map(String::as_str),
+            Some("prompt-caching-2024-07-31")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_v1_messages_accepts_x_api_key() {
+        let (_worker, url, _port) = start_worker().await;
+
+        // The worker's /health answers 200, so any presented credential
+        // validates; a missing credential must still be rejected.
+        let mut config = make_config(vec![url.clone()], None);
+        config.api_key_validation_urls = vec![format!("{url}/health")];
+        let app_context = common::create_test_context(config.clone());
+        let router: Arc<dyn RouterTrait> =
+            Arc::from(RouterFactory::create_router(&app_context).await.unwrap());
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+        let app = common::test_app::create_test_app(router, Client::new(), &config);
+
+        let with_key = Request::builder()
+            .method("POST")
+            .uri("/v1/messages")
+            .header(CONTENT_TYPE, "application/json")
+            .header("x-api-key", "anthropic-client-key")
+            .header("anthropic-version", "2023-06-01")
+            .body(Body::from(
+                serde_json::to_string(&messages_payload()).unwrap(),
+            ))
+            .unwrap();
+        let resp = app.clone().oneshot(with_key).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let without_key = Request::builder()
+            .method("POST")
+            .uri("/v1/messages")
+            .header(CONTENT_TYPE, "application/json")
+            .header("anthropic-version", "2023-06-01")
+            .body(Body::from(
+                serde_json::to_string(&messages_payload()).unwrap(),
+            ))
+            .unwrap();
+        let resp = app.oneshot(without_key).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+}

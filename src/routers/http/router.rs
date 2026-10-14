@@ -2607,6 +2607,18 @@ impl RouterTrait for Router {
             request_builder = request_builder.header("Authorization", format!("Bearer {}", key));
         }
 
+        // The EPD branch above copies every request header, but the plain
+        // path only sends the router's own credential downstream. That drops
+        // protocol-negotiation headers, and backends reject Anthropic
+        // Messages requests whose `anthropic-version` went missing.
+        if self.epd.is_none() {
+            request_builder = header_utils::propagate_headers(
+                request_builder,
+                headers,
+                header_utils::ANTHROPIC_PROTOCOL_HEADER_NAMES,
+            );
+        }
+
         // Send request
         let response = match otel_http::send_client_request(
             request_builder,

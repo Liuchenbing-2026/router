@@ -337,6 +337,28 @@ async fn v1_responses(
         .await
 }
 
+/// Anthropic Messages API endpoint.
+///
+/// Claude Code / Anthropic SDK clients post here with `x-api-key` plus an
+/// `anthropic-version` header and get an Anthropic-shaped payload back from
+/// the worker. Registering it as a first-class route means it shares the
+/// authenticated, concurrency-limited path instead of relying on the
+/// catch-all transparent proxy fallback.
+async fn v1_messages(
+    State(state): State<Arc<AppState>>,
+    headers: http::HeaderMap,
+    Json(body): Json<serde_json::Value>,
+) -> Response {
+    if let Err(response) = authorize_request(&state, &headers).await {
+        return response;
+    }
+
+    state
+        .router
+        .route_transparent(Some(&headers), "/v1/messages", &http::Method::POST, body)
+        .await
+}
+
 async fn v1_embeddings(
     State(state): State<Arc<AppState>>,
     headers: http::HeaderMap,
@@ -840,6 +862,7 @@ pub fn build_app_with_wasm_middleware(
         .route("/rerank", post(rerank))
         .route("/v1/rerank", post(v1_rerank))
         .route("/v1/responses", post(v1_responses))
+        .route("/v1/messages", post(v1_messages))
         .route("/v1/embeddings", post(v1_embeddings))
         .route("/v1/responses/{response_id}", get(v1_responses_get))
         .route(

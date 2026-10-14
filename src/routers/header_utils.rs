@@ -4,6 +4,13 @@ use axum::http::HeaderMap;
 
 pub use crate::otel_http::TRACE_HEADER_NAMES;
 
+/// Client-facing protocol headers for the Anthropic Messages API.
+///
+/// `anthropic-version` is mandatory for `/v1/messages` callers and backends
+/// reject requests that omit it, so the transparent proxy must forward it
+/// verbatim instead of only injecting the router's own credential.
+pub const ANTHROPIC_PROTOCOL_HEADER_NAMES: &[&str] = &["anthropic-version", "anthropic-beta"];
+
 /// Copy request headers to a Vec of name-value string pairs
 /// Used for forwarding headers to backend workers
 pub fn copy_request_headers(req: &Request<Body>) -> Vec<(String, String)> {
@@ -126,5 +133,32 @@ mod tests {
 
         assert_eq!(result.len(), 1);
         assert_eq!(result["content-type"], "application/json");
+    }
+
+    #[test]
+    fn test_propagate_headers_forwards_anthropic_protocol_headers() {
+        let mut headers = HeaderMap::new();
+        headers.insert("anthropic-version", "2023-06-01".parse().unwrap());
+        headers.insert(
+            "anthropic-beta",
+            "prompt-caching-2024-07-31".parse().unwrap(),
+        );
+        headers.insert("authorization", "Bearer secret".parse().unwrap());
+
+        let request = propagate_headers(
+            reqwest::Client::new().post("http://127.0.0.1:1/v1/messages"),
+            Some(&headers),
+            ANTHROPIC_PROTOCOL_HEADER_NAMES,
+        )
+        .build()
+        .unwrap();
+
+        assert_eq!(request.headers()["anthropic-version"], "2023-06-01");
+        assert_eq!(
+            request.headers()["anthropic-beta"],
+            "prompt-caching-2024-07-31"
+        );
+        // Only protocol headers travel downstream; credentials stay router-side.
+        assert!(request.headers().get("authorization").is_none());
     }
 }

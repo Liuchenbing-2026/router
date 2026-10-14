@@ -80,6 +80,7 @@ impl MockWorker {
             .route("/v1/completions", post(completions_handler))
             .route("/v1/rerank", post(rerank_handler))
             .route("/v1/responses", post(responses_handler))
+            .route("/v1/messages", post(messages_handler))
             .route("/v1/responses/{response_id}", get(responses_get_handler))
             .route(
                 "/v1/responses/{response_id}/cancel",
@@ -467,6 +468,68 @@ async fn chat_completions_handler(
         }))
         .into_response()
     }
+}
+
+/// Anthropic Messages (`/v1/messages`) handler.
+///
+/// Mirrors the chat handler closely enough for router tests: it records the
+/// request headers so tests can assert on `anthropic-version` passthrough and
+/// replies with an Anthropic-shaped body.
+async fn messages_handler(
+    State(config): State<Arc<RwLock<MockWorkerConfig>>>,
+    headers: axum::http::HeaderMap,
+    Json(payload): Json<serde_json::Value>,
+) -> Response {
+    let config = config.read().await;
+
+    capture_request(config.port, "/v1/messages", &headers);
+
+    if should_fail(&config).await {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({
+                "type": "error",
+                "error": {
+                    "type": "api_error",
+                    "message": "Random failure for testing"
+                }
+            })),
+        )
+            .into_response();
+    }
+
+    if config.response_delay_ms > 0 {
+        tokio::time::sleep(tokio::time::Duration::from_millis(config.response_delay_ms)).await;
+    }
+
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+
+    let model = payload
+        .get("model")
+        .and_then(|v| v.as_str())
+        .unwrap_or("mock-model");
+
+    Json(json!({
+        "id": format!("msg_{}", Uuid::new_v4()),
+        "type": "message",
+        "role": "assistant",
+        "model": model,
+        "content": [{
+            "type": "text",
+            "text": "This is a mock Anthropic Messages response."
+        }],
+        "stop_reason": "end_turn",
+        "stop_sequence": null,
+        "created": timestamp,
+        "usage": {
+            "input_tokens": 10,
+            "output_tokens": 5
+        }
+    }))
+    .into_response()
 }
 
 async fn completions_handler(

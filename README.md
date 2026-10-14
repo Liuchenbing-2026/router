@@ -14,6 +14,7 @@ A high-performance and light-weight request forwarding system for vLLM large sca
 - **Service Discovery**: Kubernetes-native worker management and health monitoring
 - **Enterprise Features**: Circuit breakers, retry logic, metrics collection
 - **gRPC workers**: Route to vLLM Rust Inference workers via `grpc://` URLs
+- **Anthropic Messages API**: First-class `POST /v1/messages` routing for Anthropic SDK / Claude Code clients
 
 ## Quick Start
 
@@ -156,7 +157,8 @@ cargo run --release -- \
 ### Authentication
 
 Enable bearer-token validation by listing validation URLs (comma-separated) in `.env` via `API_KEY_VALIDATION_URLS` or passing `--api-key-validation-urls`.
-When set, all HTTP endpoints require `Authorization: Bearer <token>` and tokens are validated with HTTP 200 responses.
+When set, all HTTP endpoints require a credential and tokens are validated with HTTP 200 responses.
+`Authorization: Bearer <token>` is preferred; Anthropic Messages clients may send the token in `x-api-key` instead.
 
 ```bash
 # .env
