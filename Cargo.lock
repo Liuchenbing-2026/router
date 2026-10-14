@@ -7146,7 +7146,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 [[package]]
 name = "vllm-chat"
 version = "0.1.0"
-source = "git+https://github.com/Liuchenbing-2026/vllm?rev=d27c04501e15e8a0b314d4f1f03fd325555d8ea0#d27c04501e15e8a0b314d4f1f03fd325555d8ea0"
+source = "git+https://github.com/Liuchenbing-2026/vllm?rev=74dab4c0e804878a3ce587718a7e9ad12ef1b8c8#74dab4c0e804878a3ce587718a7e9ad12ef1b8c8"
 dependencies = [
  "anyhow",
  "asynk-strim-attr",
@@ -7186,7 +7186,7 @@ dependencies = [
 [[package]]
 name = "vllm-engine-core-client"
 version = "0.1.0"
-source = "git+https://github.com/Liuchenbing-2026/vllm?rev=d27c04501e15e8a0b314d4f1f03fd325555d8ea0#d27c04501e15e8a0b314d4f1f03fd325555d8ea0"
+source = "git+https://github.com/Liuchenbing-2026/vllm?rev=74dab4c0e804878a3ce587718a7e9ad12ef1b8c8#74dab4c0e804878a3ce587718a7e9ad12ef1b8c8"
 dependencies = [
  "arc-swap",
  "bytemuck",
@@ -7222,7 +7222,7 @@ dependencies = [
 [[package]]
 name = "vllm-llm"
 version = "0.1.0"
-source = "git+https://github.com/Liuchenbing-2026/vllm?rev=d27c04501e15e8a0b314d4f1f03fd325555d8ea0#d27c04501e15e8a0b314d4f1f03fd325555d8ea0"
+source = "git+https://github.com/Liuchenbing-2026/vllm?rev=74dab4c0e804878a3ce587718a7e9ad12ef1b8c8#74dab4c0e804878a3ce587718a7e9ad12ef1b8c8"
 dependencies = [
  "easy-ext",
  "enum-as-inner",
@@ -7242,7 +7242,7 @@ dependencies = [
 [[package]]
 name = "vllm-metrics"
 version = "0.1.0"
-source = "git+https://github.com/Liuchenbing-2026/vllm?rev=d27c04501e15e8a0b314d4f1f03fd325555d8ea0#d27c04501e15e8a0b314d4f1f03fd325555d8ea0"
+source = "git+https://github.com/Liuchenbing-2026/vllm?rev=74dab4c0e804878a3ce587718a7e9ad12ef1b8c8#74dab4c0e804878a3ce587718a7e9ad12ef1b8c8"
 dependencies = [
  "itertools 0.14.0",
  "prometheus-client",
@@ -7251,7 +7251,7 @@ dependencies = [
 [[package]]
 name = "vllm-parser"
 version = "0.1.0"
-source = "git+https://github.com/Liuchenbing-2026/vllm?rev=d27c04501e15e8a0b314d4f1f03fd325555d8ea0#d27c04501e15e8a0b314d4f1f03fd325555d8ea0"
+source = "git+https://github.com/Liuchenbing-2026/vllm?rev=74dab4c0e804878a3ce587718a7e9ad12ef1b8c8#74dab4c0e804878a3ce587718a7e9ad12ef1b8c8"
 dependencies = [
  "auto_impl",
  "easy-ext",
@@ -7287,7 +7287,7 @@ dependencies = [
 [[package]]
 name = "vllm-text"
 version = "0.1.0"
-source = "git+https://github.com/Liuchenbing-2026/vllm?rev=d27c04501e15e8a0b314d4f1f03fd325555d8ea0#d27c04501e15e8a0b314d4f1f03fd325555d8ea0"
+source = "git+https://github.com/Liuchenbing-2026/vllm?rev=74dab4c0e804878a3ce587718a7e9ad12ef1b8c8#74dab4c0e804878a3ce587718a7e9ad12ef1b8c8"
 dependencies = [
  "anyhow",
  "asynk-strim-attr",
@@ -7313,7 +7313,7 @@ dependencies = [
 [[package]]
 name = "vllm-tokenizer"
 version = "0.1.0"
-source = "git+https://github.com/Liuchenbing-2026/vllm?rev=d27c04501e15e8a0b314d4f1f03fd325555d8ea0#d27c04501e15e8a0b314d4f1f03fd325555d8ea0"
+source = "git+https://github.com/Liuchenbing-2026/vllm?rev=74dab4c0e804878a3ce587718a7e9ad12ef1b8c8#74dab4c0e804878a3ce587718a7e9ad12ef1b8c8"
 dependencies = [
  "base64 0.22.1",
  "fastokens",
@@ -7333,7 +7333,7 @@ dependencies = [
 [[package]]
 name = "vllm-tracing"
 version = "0.1.0"
-source = "git+https://github.com/Liuchenbing-2026/vllm?rev=d27c04501e15e8a0b314d4f1f03fd325555d8ea0#d27c04501e15e8a0b314d4f1f03fd325555d8ea0"
+source = "git+https://github.com/Liuchenbing-2026/vllm?rev=74dab4c0e804878a3ce587718a7e9ad12ef1b8c8#74dab4c0e804878a3ce587718a7e9ad12ef1b8c8"
 dependencies = [
  "time",
  "tracing",

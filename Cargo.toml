@@ -101,9 +101,9 @@ vllm-proto = "0.2"
 # to a local checkout if you already have the rust workspace.
 # Custom role metadata and DeepSeek reminder support currently require this
 # unreleased revision. Keep all three crates on the same verified workspace.
-vllm-chat = { git = "https://github.com/Liuchenbing-2026/vllm", rev = "d27c04501e15e8a0b314d4f1f03fd325555d8ea0" }
-vllm-tokenizer = { git = "https://github.com/Liuchenbing-2026/vllm", rev = "d27c04501e15e8a0b314d4f1f03fd325555d8ea0" }
-vllm-text = { git = "https://github.com/Liuchenbing-2026/vllm", rev = "d27c04501e15e8a0b314d4f1f03fd325555d8ea0" }
+vllm-chat = { git = "https://github.com/Liuchenbing-2026/vllm", rev = "74dab4c0e804878a3ce587718a7e9ad12ef1b8c8" }
+vllm-tokenizer = { git = "https://github.com/Liuchenbing-2026/vllm", rev = "74dab4c0e804878a3ce587718a7e9ad12ef1b8c8" }
+vllm-text = { git = "https://github.com/Liuchenbing-2026/vllm", rev = "74dab4c0e804878a3ce587718a7e9ad12ef1b8c8" }
 
 [dev-dependencies]
 libc = "0.2"

@@ -231,3 +231,42 @@ async fn native_renderer_rejects_unsupported_custom_role_before_dispatch() {
         .to_string()
         .contains("chat role `checkpoint` is not supported"));
 }
+
+#[tokio::test]
+async fn deepseek_system_reminder_ids_match_python_before_worker_dispatch() {
+    let model = fixture::model_fixture();
+    std::fs::write(
+        model.path().join("config.json"),
+        json!({"model_type": "deepseek_v4", "vocab_size": 293}).to_string(),
+    )
+    .unwrap();
+    let worker = MockVllmRsServer::spawn().await;
+    let frontend = EngineFrontend::new();
+    for trailing_assistant in [false, true] {
+        let mut messages = vec![
+            json!({"role": "system", "content": "rules"}),
+            json!({"role": "latest_reminder", "content": "Be brief"}),
+        ];
+        let prompt = if trailing_assistant {
+            messages.push(json!({"role": "assistant", "content": "Hi there"}));
+            "<｜begin▁of▁sentence｜>rules<｜latest_reminder｜>Be briefHi there<｜end▁of▁sentence｜>"
+        } else {
+            "<｜begin▁of▁sentence｜>rules<｜latest_reminder｜>Be brief"
+        };
+        let request: ChatCompletionRequest = serde_json::from_value(json!({
+            "model": model.path().to_str().unwrap(),
+            "messages": messages,
+            "chat_template_kwargs": {"thinking": false},
+            "max_tokens": 1
+        }))
+        .unwrap();
+        let prepared = frontend.prepare(request).await.unwrap();
+        let expected = expected_ids(&model, prompt);
+        assert_eq!(prepared.tokenized.token_ids.as_ref(), expected.as_slice());
+        let response = frontend.dispatch(&worker.grpc_url, prepared).await;
+        assert_eq!(response.status(), 200);
+        to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(worker.captured().last().unwrap().token_ids, expected);
+    }
+    assert_eq!(worker.captured().len(), 2);
+}

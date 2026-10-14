@@ -56,7 +56,7 @@ Custom metadata affects the rendered prompt, so different rendered inputs do
 not share an L0 cache entry.
 
 These frontend crates currently use an unreleased, fixed workspace revision:
-[`d27c04501e15e8a0b314d4f1f03fd325555d8ea0`](https://github.com/Liuchenbing-2026/vllm/commit/d27c04501e15e8a0b314d4f1f03fd325555d8ea0).
+[`74dab4c0e804878a3ce587718a7e9ad12ef1b8c8`](https://github.com/Liuchenbing-2026/vllm/commit/74dab4c0e804878a3ce587718a7e9ad12ef1b8c8).
 All three dependencies in `Cargo.toml` must stay on that revision. This is a
 temporary fork dependency providing custom metadata and native reminder
 rendering; it should move to an upstream revision containing those capabilities
