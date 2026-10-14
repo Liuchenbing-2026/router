@@ -11,7 +11,7 @@ use vllm_chat::{
     ChatToolChoice, GenerationPromptMode, LoadModelBackendsOptions, LoadedModelBackends,
     ReasoningEffort, ResolvedToolContext, SamplingParams,
 };
-use vllm_text::TextDecodeOptions;
+use vllm_text::{Prompt, TextDecodeOptions};
 
 use super::encode_cache::{deterministic_model, FrontendCache, PromptEncoder};
 use vllm_tokenizer::{IncrementalDecoder, Tokenizer};
@@ -75,23 +75,43 @@ impl VllmFrontend {
             .default_temperature)
     }
 
+    /// Apply the chat template only, returning the prompt and the time spent
+    /// rendering. Split out so a caller can cache the render and still hand
+    /// every encode to the shared L0 encoding cache, keeping its hit/miss
+    /// accounting and this layer's render caching independent.
+    pub fn chat_render_timed(&self, request: &ChatRequest) -> vllm_chat::Result<(Prompt, f64)> {
+        let t0 = Instant::now();
+        let rendered = self.backends.chat_backend.chat_renderer().render(request)?;
+        let template_ms = t0.elapsed().as_secs_f64() * 1000.0;
+        Ok((rendered.prompt, template_ms))
+    }
+
+    /// Encode an already-rendered prompt through the shared L0 cache.
+    pub fn encode_prompt_timed(
+        &self,
+        prompt: Prompt,
+        add_special_tokens: bool,
+        cache_salt: Option<&str>,
+    ) -> vllm_chat::Result<(Vec<u32>, f64)> {
+        let t1 = Instant::now();
+        let ids = self
+            .encoder
+            .encode(prompt, add_special_tokens, cache_salt)
+            .map_err(|error| vllm_chat::Error::ChatTemplate(error.to_string()))?;
+        let encode_ms = t1.elapsed().as_secs_f64() * 1000.0;
+        Ok((ids, encode_ms))
+    }
+
     pub fn chat_tokenize_timed(
         &self,
         request: &ChatRequest,
     ) -> vllm_chat::Result<(Vec<u32>, f64, f64)> {
-        let t0 = Instant::now();
-        let rendered = self.backends.chat_backend.chat_renderer().render(request)?;
-        let template_ms = t0.elapsed().as_secs_f64() * 1000.0;
-        let t1 = Instant::now();
-        let ids = self
-            .encoder
-            .encode(
-                rendered.prompt,
-                request.add_special_tokens,
-                request.cache_salt.as_deref(),
-            )
-            .map_err(|error| vllm_chat::Error::ChatTemplate(error.to_string()))?;
-        let encode_ms = t1.elapsed().as_secs_f64() * 1000.0;
+        let (prompt, template_ms) = self.chat_render_timed(request)?;
+        let (ids, encode_ms) = self.encode_prompt_timed(
+            prompt,
+            request.add_special_tokens,
+            request.cache_salt.as_deref(),
+        )?;
         Ok((ids, template_ms, encode_ms))
     }
 }

@@ -24,6 +24,7 @@ pub mod grpc;
 pub mod health;
 pub mod openai;
 pub mod preprocess;
+pub mod tokenize_cache;
 mod vllm_frontend;
 
 /// Opt-in router stage clocks.

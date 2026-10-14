@@ -10,8 +10,7 @@ use dashmap::DashMap;
 use parking_lot::RwLock;
 
 use super::encode_cache::FrontendCache;
-use crate::tokenizer::{TokenizerCacheConfig, TokenizerCacheStats};
-
+use super::tokenize_cache::{cache_key, CachedTokenize, TokenizeCache, TokenizeCacheConfig};
 use super::vllm_frontend::{
     chat_request_from_openai, system_text, tool_text, user_text, OpenAiChatRequest, VllmFrontend,
 };
@@ -19,6 +18,7 @@ use crate::protocols::spec::{
     ChatCompletionRequest, ChatMessage as SpecChatMessage, ToolChoice as SpecToolChoice,
     ToolChoiceValue, UserMessageContent,
 };
+use crate::tokenizer::{TokenizerCacheConfig, TokenizerCacheStats};
 use vllm_chat::{
     AssistantContentBlock, AssistantToolCall, ChatTool, ChatToolChoice,
     ReasoningEffort as VllmReasoningEffort,
@@ -38,6 +38,10 @@ pub struct TokenizerCache {
     by_model: Arc<DashMap<String, Arc<VllmFrontend>>>,
     load_lock: Arc<tokio::sync::Mutex<()>>,
     encoding_cache: Option<Arc<FrontendCache>>,
+    /// Exact render+encode results for requests that already went through this
+    /// path. Shared by every model, because the key carries the request's own
+    /// model field.
+    tokenize: Arc<TokenizeCache>,
 }
 
 impl std::fmt::Debug for TokenizerCache {
@@ -59,6 +63,10 @@ impl TokenizerCache {
             by_model: Arc::new(DashMap::new()),
             load_lock: Arc::new(tokio::sync::Mutex::new(())),
             encoding_cache: None,
+            tokenize: Arc::new(
+                TokenizeCache::new(TokenizeCacheConfig::default())
+                    .expect("the built-in tokenize cache budgets are valid"),
+            ),
         }
     }
 
@@ -82,17 +90,17 @@ impl TokenizerCache {
 
     pub async fn resolve(&self, model: Option<&str>) -> Result<FrontendHandle> {
         if let Some(pinned) = self.pinned.read().clone() {
-            return Ok(FrontendHandle(pinned));
+            return Ok(self.handle(pinned));
         }
         let (key, source) = model_resolution(model)?;
         if let Some(hit) = self.by_model.get(&key) {
-            return Ok(FrontendHandle(Frontend::Vllm(hit.clone())));
+            return Ok(self.handle(Frontend::Vllm(hit.clone())));
         }
         // Loading a tokenizer is expensive. Re-check under a single-flight
         // lock so a cold burst does not load the same model N times.
         let _load_guard = self.load_lock.lock().await;
         if let Some(hit) = self.by_model.get(&key) {
-            return Ok(FrontendHandle(Frontend::Vllm(hit.clone())));
+            return Ok(self.handle(Frontend::Vllm(hit.clone())));
         }
         let frontend = Arc::new(
             VllmFrontend::load(&source, Default::default(), self.encoding_cache.clone())
@@ -100,7 +108,15 @@ impl TokenizerCache {
                 .map_err(|e| anyhow!("vllm-chat load {source} for key {key}: {e}"))?,
         );
         self.by_model.insert(key, frontend.clone());
-        Ok(FrontendHandle(Frontend::Vllm(frontend)))
+        Ok(self.handle(Frontend::Vllm(frontend)))
+    }
+
+    /// Wraps a resolved frontend with the shared tokenize cache.
+    fn handle(&self, frontend: Frontend) -> FrontendHandle {
+        FrontendHandle {
+            frontend,
+            tokenize: Arc::clone(&self.tokenize),
+        }
     }
 }
 
@@ -145,18 +161,23 @@ fn model_resolution(request_model: Option<&str>) -> Result<(String, String)> {
 }
 
 #[derive(Clone)]
-pub struct FrontendHandle(Frontend);
+pub struct FrontendHandle {
+    frontend: Frontend,
+    /// Exact render+encode results, shared with every other handle of this
+    /// `TokenizerCache` so a warm session stays warm across model aliases.
+    tokenize: Arc<TokenizeCache>,
+}
 
 impl FrontendHandle {
     pub fn tokenizer(&self) -> Option<super::vllm_frontend::DynTokenizer> {
-        match &self.0 {
+        match &self.frontend {
             Frontend::Vllm(frontend) => Some(frontend.tokenizer()),
             Frontend::TestIds(_) => None,
         }
     }
 
     pub fn default_temperature(&self) -> Result<Option<f32>> {
-        match &self.0 {
+        match &self.frontend {
             Frontend::Vllm(frontend) => frontend.default_temperature(),
             Frontend::TestIds(_) => Ok(None),
         }
@@ -182,7 +203,7 @@ pub fn tokenize_chat_request_timed(
     request: &ChatCompletionRequest,
     frontend: &FrontendHandle,
 ) -> Result<TokenizeOut> {
-    match &frontend.0 {
+    match &frontend.frontend {
         Frontend::TestIds(ids) => {
             if ids.is_empty() {
                 return Err(anyhow!("pinned test token_ids are empty"));
@@ -195,11 +216,15 @@ pub fn tokenize_chat_request_timed(
                 encode_backend: "test-pin",
             })
         }
-        Frontend::Vllm(vllm) => tokenize_vllm(request, vllm),
+        Frontend::Vllm(vllm) => tokenize_vllm(request, vllm, &frontend.tokenize),
     }
 }
 
-fn tokenize_vllm(request: &ChatCompletionRequest, frontend: &VllmFrontend) -> Result<TokenizeOut> {
+fn tokenize_vllm(
+    request: &ChatCompletionRequest,
+    frontend: &VllmFrontend,
+    cache: &TokenizeCache,
+) -> Result<TokenizeOut> {
     if request
         .tools
         .as_ref()
@@ -217,6 +242,41 @@ fn tokenize_vllm(request: &ChatCompletionRequest, frontend: &VllmFrontend) -> Re
         return Err(anyhow!(
             "reasoning_effort requires vllm-chat output parsing, which the gRPC response adapter does not yet expose"
         ));
+    }
+    // The cache key covers the whole wire request, so a hit is valid for every
+    // field the lowering below reads. Looking it up before the lowering also
+    // skips the OpenAI -> ChatRequest conversion, which is part of the cost of
+    // a repeated agent turn.
+    // The encode step needs these two fields; both live in `other`, which the
+    // cache key covers, so a hit is guaranteed to match the render it returns.
+    let add_special_tokens = request
+        .other
+        .get("add_special_tokens")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let cache_salt = request
+        .other
+        .get("cache_salt")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string);
+
+    let cache_key = cache_key(request)?;
+    if let Some(hit) = cache.get(&cache_key) {
+        // Render is skipped, but the encode still goes through the shared L0
+        // encoding cache so its hit/miss accounting stays faithful.
+        let (token_ids, encode_ms) = frontend
+            .encode_prompt_timed(hit.prompt, add_special_tokens, cache_salt.as_deref())
+            .map_err(|e| anyhow!("vllm-chat tokenize: {e}"))?;
+        if token_ids.is_empty() {
+            return Err(anyhow!("vllm-chat produced empty token_ids"));
+        }
+        return Ok(TokenizeOut {
+            token_ids: Arc::from(token_ids),
+            adapt_ms: 0.0,
+            template_ms: hit.template_ms,
+            encode_ms,
+            encode_backend: "vllm-tokenizer",
+        });
     }
     let t0 = Instant::now();
     let kwargs = request.chat_template_kwargs.clone().unwrap_or_default();
@@ -268,30 +328,39 @@ fn tokenize_vllm(request: &ChatCompletionRequest, frontend: &VllmFrontend) -> Re
             .as_ref()
             .map(serde_json::to_value)
             .transpose()?,
-        add_special_tokens: request
-            .other
-            .get("add_special_tokens")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false),
+        add_special_tokens,
         documents,
         priority,
-        cache_salt: request
-            .other
-            .get("cache_salt")
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_string),
+        cache_salt: cache_salt.clone(),
         data_parallel_rank,
         session_id,
     })?;
     let adapt_ms = t0.elapsed().as_secs_f64() * 1000.0;
-    let (token_ids, template_ms, encode_ms) = frontend
-        .chat_tokenize_timed(&upstream)
+    let (prompt, template_ms) = frontend
+        .chat_render_timed(&upstream)
+        .map_err(|e| anyhow!("vllm-chat tokenize: {e}"))?;
+    // Keep a copy for the render cache only once the whole request succeeds.
+    let cached_prompt = prompt.clone();
+    let (token_ids, encode_ms) = frontend
+        .encode_prompt_timed(
+            prompt,
+            upstream.add_special_tokens,
+            upstream.cache_salt.as_deref(),
+        )
         .map_err(|e| anyhow!("vllm-chat tokenize: {e}"))?;
     if token_ids.is_empty() {
         return Err(anyhow!("vllm-chat produced empty token_ids"));
     }
+    let token_ids: Arc<[u32]> = Arc::from(token_ids);
+    cache.put(
+        cache_key,
+        CachedTokenize {
+            prompt: cached_prompt,
+            template_ms,
+        },
+    );
     Ok(TokenizeOut {
-        token_ids: Arc::from(token_ids),
+        token_ids,
         adapt_ms,
         template_ms,
         encode_ms,
@@ -534,7 +603,11 @@ mod tests {
             "add_generation_prompt": true
         }))
         .unwrap();
-        tokenize_vllm(&req, &frontend)
+        // A throwaway cache: this probe renders the request once and has no
+        // interest in the router's shared entries.
+        let cache = TokenizeCache::new(TokenizeCacheConfig::default())
+            .expect("the built-in tokenize cache budgets are valid");
+        tokenize_vllm(&req, &frontend, &cache)
             .expect("vllm-chat tokenize")
             .token_ids
             .to_vec()

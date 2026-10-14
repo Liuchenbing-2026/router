@@ -1006,6 +1006,30 @@ impl TokenizerMetrics {
         .increment(1);
     }
 
+    // Render+encode result cache metrics (gRPC request path). Counted here
+    // rather than on the tokenizer cache so the two caches stay separable in
+    // dashboards.
+    pub fn record_tokenize_cache_hit() {
+        counter!("vllm_router_tokenize_cache_hits_total").increment(1);
+    }
+
+    pub fn record_tokenize_cache_miss() {
+        counter!("vllm_router_tokenize_cache_misses_total").increment(1);
+    }
+
+    pub fn record_tokenize_cache_eviction() {
+        counter!("vllm_router_tokenize_cache_evictions_total").increment(1);
+    }
+
+    pub fn record_tokenize_cache_oversized() {
+        counter!("vllm_router_tokenize_cache_oversized_total").increment(1);
+    }
+
+    pub fn record_tokenize_cache_occupancy(entries: usize, bytes: usize) {
+        gauge!("vllm_router_tokenize_cache_entries").set(entries as f64);
+        gauge!("vllm_router_tokenize_cache_bytes").set(bytes as f64);
+    }
+
     pub fn record_factory_error(error_type: &str) {
         counter!("vllm_tokenizer_factory_errors_total",
             "error_type" => error_type.to_string()

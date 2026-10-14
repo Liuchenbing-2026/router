@@ -133,6 +133,11 @@ harness = false
 path = "benches/tokenizer_cache_benchmark.rs"
 
 [[bench]]
+name = "p2_request_cache_bench"
+harness = false
+path = "benches/p2_request_cache_bench.rs"
+
+[[bench]]
 name = "routing_input"
 harness = false
 path = "benches/routing_input.rs"
