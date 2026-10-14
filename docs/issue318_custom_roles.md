@@ -69,6 +69,21 @@ Python 4 cases 单独计量，不是额外四个 Rust tests。
 测试使用仓库内小型 byte-level BPE tokenizer；没有验证 DeepSeek 正式词表和引擎的端到端一致性。
 不包含性能收益、模型输出质量、全部测试或远端 CI 结论。
 
+### 后续入口与缓存回归（2026-10-14）
+
+`tests/grpc_custom_roles.rs` 新增三项回归后，当前该测试目标实际执行 7 项并全部通过：
+
+- 使用实际服务的 HTTP app 处理 `/v1/chat/completions`，覆盖流式和非流式响应；
+  独立编码预期 prompt，并检查 mock gRPC worker 收到的 token IDs。
+- 五类非法自定义消息返回 HTTP 400，worker 未收到请求；随后合法消息仍能成功。
+- 自定义 role 或正文变化时分别建立 L0 缓存项；重复请求命中；缓存已预热时，
+  不可表示的 `metadata` 扩展仍被拒绝，缓存计数不变。
+
+此增量只补充测试，不更改运行时依赖或扩展字段合同。上表 147 项是首版实际执行口径，
+不把历史批次与本次执行数量相加作为一次完整验收结果。
+本次联合重跑 `grpc_custom_roles`（7）、`grpc_frontend_l0`（1）、
+`grpc_vs_http_e2e`（6），共 14 项实际执行并通过；格式和 diff 检查通过。
+
 ## 复现
 
 Linux aarch64，Rust 1.99.0。先准备 Cargo.lock 指定依赖；缓存齐全后以下命令可离线运行：
@@ -99,5 +114,7 @@ git diff --check
 2. 如要求任意 raw-message 扩展兼容，需先扩上游类型/renderer 合同；不能绕过校验偷偷丢字段。
 3. 真机验收需隔离的 0.30 系列服务环境、实际镜像 ID、模型 tokenizer 与可用的 gRPC worker。
    用同一请求比较 Python/Rust prompt/token IDs，再测流式/非流式生成；这一步才需要 GPU/NPU 推理资源。
-4. 本地分支独立于认证修复和 KV trust 原型；未 push、未创建 PR/Issue。回退时保留此分支，使用原基线构建，
+4. 本分支独立于认证修复和 KV trust 原型；首版 `e008366` 已推送到个人 fork 的同名分支，未创建 PR/Issue。
+   另一修复分支 `fix/issue-318-custom-grpc-roles-20261014` 保留不变；两版依赖与扩展字段支持不同，尚未统一。
+   回退时保留此分支，使用原基线构建，
    不对其他工作树执行 reset/checkout，也不把这份临时依赖升级混入生产。

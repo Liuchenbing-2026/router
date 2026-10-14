@@ -7,8 +7,182 @@ use axum::body::to_bytes;
 use common::mock_vllm_rs::MockVllmRsServer;
 use fixture::model_fixture;
 use serde_json::json;
+use std::sync::Arc;
+use std::time::Duration;
+use tower::ServiceExt;
 use vllm_router_rs::backend::EngineFrontend;
+use vllm_router_rs::config::{PolicyConfig, RouterConfig, RoutingMode};
 use vllm_router_rs::protocols::spec::ChatCompletionRequest;
+use vllm_router_rs::routers::http::router::Router;
+
+async fn grpc_app(worker: &MockVllmRsServer) -> axum::Router {
+    let config = RouterConfig {
+        mode: RoutingMode::Regular {
+            worker_urls: vec![worker.grpc_url.clone()],
+        },
+        policy: PolicyConfig::RoundRobin,
+        disable_circuit_breaker: true,
+        ..Default::default()
+    };
+    let router = Router::new(
+        vec![worker.grpc_url.clone()],
+        &common::create_test_context(config.clone()),
+    )
+    .await
+    .unwrap();
+    common::test_app::create_test_app(Arc::new(router), reqwest::Client::new(), &config)
+}
+
+fn post_chat(body: &serde_json::Value) -> axum::http::Request<axum::body::Body> {
+    axum::http::Request::builder()
+        .method("POST")
+        .uri("/v1/chat/completions")
+        .header("content-type", "application/json")
+        .body(axum::body::Body::from(serde_json::to_vec(body).unwrap()))
+        .unwrap()
+}
+
+#[tokio::test]
+async fn custom_role_http_entry_reaches_grpc_in_streaming_and_nonstreaming_modes() {
+    let model = model_fixture();
+    let worker = MockVllmRsServer::spawn().await;
+    let app = grpc_app(&worker).await;
+    // Compute the oracle independently of EngineFrontend::prepare.
+    let tokenizer = tokenizers::Tokenizer::from_file(model.path().join("tokenizer.json")).unwrap();
+    let expected = tokenizer
+        .encode(
+            "user: Hello\nlatest_reminder: Be brief 世界\nassistant: ",
+            false,
+        )
+        .unwrap()
+        .get_ids()
+        .to_vec();
+    for stream in [false, true] {
+        let response = app
+            .clone()
+            .oneshot(post_chat(&json!({
+                "model": model.path().to_str().unwrap(),
+                "messages": [
+                    {"role": "user", "content": "Hello"},
+                    {"role": "latest_reminder", "content": "Be brief 世界"}
+                ],
+                "max_tokens": 8, "stream": stream
+            })))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        if stream {
+            let text = std::str::from_utf8(&body).unwrap();
+            assert!(text.contains("chat.completion.chunk"));
+            assert!(text.contains("[DONE]"));
+        } else {
+            let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(body["usage"]["prompt_tokens"], expected.len());
+        }
+    }
+    let captured = worker.captured();
+    assert_eq!(captured.len(), 2);
+    for request in captured {
+        assert!(!request.had_text_prompt);
+        assert_eq!(request.token_ids, expected);
+    }
+}
+
+#[tokio::test]
+async fn invalid_custom_messages_return_http_400_without_worker_dispatch() {
+    let model = model_fixture();
+    let worker = MockVllmRsServer::spawn().await;
+    let app = grpc_app(&worker).await;
+    for message in [
+        json!({"role": "checkpoint", "content": null}),
+        json!({"role": "checkpoint"}),
+        json!({"role": "checkpoint", "content": "hello", "metadata": {"step": 2}}),
+        json!({"role": "checkpoint", "content": [{"type": "text", "text": "hello", "extra": true}]}),
+        json!({"role": "checkpoint", "content": [{"type": "image_url", "image_url": {"url": "https://example.invalid/image.png"}}]}),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(post_chat(&json!({
+                "model": model.path().to_str().unwrap(),
+                "messages": [message], "max_tokens": 8
+            })))
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        assert_eq!(
+            status,
+            axum::http::StatusCode::BAD_REQUEST,
+            "{message}: {}",
+            String::from_utf8_lossy(&body)
+        );
+        assert!(
+            worker.captured().is_empty(),
+            "invalid input reached worker: {message}"
+        );
+    }
+    // A valid request after the errors proves the worker/router remained usable.
+    let response = app
+        .oneshot(post_chat(&json!({
+            "model": model.path().to_str().unwrap(),
+            "messages": [{"role": "checkpoint", "content": "hello"}], "max_tokens": 8
+        })))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+    assert_eq!(worker.captured().len(), 1);
+}
+
+#[tokio::test]
+async fn custom_role_cache_separates_role_and_content_and_does_not_skip_validation() {
+    let model = model_fixture();
+    let frontend =
+        EngineFrontend::with_tokenizer_cache(Duration::from_secs(30), Default::default()).unwrap();
+    let tokenizer = tokenizers::Tokenizer::from_file(model.path().join("tokenizer.json")).unwrap();
+    let mut outputs = Vec::new();
+    for (role, content) in [
+        ("checkpoint", "blue"),
+        ("checkpoint", "red"),
+        ("latest_reminder", "blue"),
+    ] {
+        let value = json!({
+            "model": model.path().to_str().unwrap(),
+            "messages": [{"role": role, "content": content}], "max_tokens": 8
+        });
+        let expected = tokenizer
+            .encode(format!("{role}: {content}\nassistant: "), false)
+            .unwrap()
+            .get_ids()
+            .to_vec();
+        for _ in 0..2 {
+            let prepared = frontend
+                .prepare(serde_json::from_value(value.clone()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(prepared.tokenized.token_ids.as_ref(), expected.as_slice());
+        }
+        outputs.push(expected);
+        let before = frontend.tokenizer_cache_stats().unwrap();
+        let mut invalid = value;
+        invalid["messages"][0]["metadata"] = json!({"step": 1});
+        let error = frontend
+            .prepare(serde_json::from_value(invalid).unwrap())
+            .await
+            .err()
+            .expect("cache must not bypass extension validation");
+        assert!(
+            error.contains("metadata") && error.contains("cannot be represented"),
+            "{error}"
+        );
+        assert_eq!(frontend.tokenizer_cache_stats().unwrap(), before);
+    }
+    assert_ne!(outputs[0], outputs[1]);
+    assert_ne!(outputs[0], outputs[2]);
+    let stats = frontend.tokenizer_cache_stats().unwrap();
+    assert_eq!((stats.misses, stats.hits, stats.entries), (3, 3, 3));
+}
 
 #[tokio::test]
 async fn custom_role_reaches_grpc_worker_without_role_rewriting() {
