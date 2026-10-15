@@ -379,6 +379,14 @@ fn spec_messages_to_upstream(
                         })?;
                     let text = user_content_text(&content)?;
                     if role == "developer" {
+                        if value.get("tools").is_some_and(|tools| {
+                            !tools.is_null()
+                                && tools.as_array().is_none_or(|tools| !tools.is_empty())
+                        }) {
+                            return Err(anyhow!(
+                                "developer message-local tools are not supported by the router gRPC frontend"
+                            ));
+                        }
                         super::vllm_frontend::UpstreamChatMessage::developer(text, None)
                     } else {
                         let mut extra_fields = value
@@ -616,6 +624,32 @@ mod tests {
                 messages[0].text_content().unwrap(),
                 "Model-specific instructions."
             );
+        }
+    }
+
+    #[test]
+    fn developer_tools_are_rejected_instead_of_silently_discarded() {
+        for tools in [
+            serde_json::json!([{"type":"function", "function":{"name":"weather", "parameters":{}}}]),
+            serde_json::json!({}),
+            serde_json::json!("invalid"),
+            serde_json::json!(false),
+        ] {
+            let request: ChatCompletionRequest = serde_json::from_value(serde_json::json!({
+                "messages": [{"role":"developer", "content":"policy", "tools":tools}]
+            }))
+            .unwrap();
+            let error = spec_messages_to_upstream(&request.messages).unwrap_err();
+            assert!(error.to_string().contains("developer message-local tools"));
+        }
+        for tools in [serde_json::Value::Null, serde_json::json!([])] {
+            let request: ChatCompletionRequest = serde_json::from_value(serde_json::json!({
+                "messages": [{"role":"developer", "content":"policy", "tools":tools}]
+            }))
+            .unwrap();
+            let messages = spec_messages_to_upstream(&request.messages).unwrap();
+            assert_eq!(messages[0].role().as_str(), "developer");
+            assert_eq!(messages[0].text_content().unwrap(), "policy");
         }
     }
 

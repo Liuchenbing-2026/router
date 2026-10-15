@@ -24,6 +24,53 @@ fn expected_ids(model: &tempfile::TempDir, prompt: &str) -> Vec<u32> {
 }
 
 #[tokio::test]
+async fn developer_local_tools_return_400_without_worker_dispatch() {
+    let model = fixture::model_fixture();
+    let worker = MockVllmRsServer::spawn().await;
+    let config = RouterConfig {
+        mode: RoutingMode::Regular {
+            worker_urls: vec![worker.grpc_url.clone()],
+        },
+        policy: PolicyConfig::RoundRobin,
+        disable_circuit_breaker: true,
+        ..Default::default()
+    };
+    let router = Router::new(
+        vec![worker.grpc_url.clone()],
+        &common::create_test_context(config.clone()),
+    )
+    .await
+    .unwrap();
+    let app = common::test_app::create_test_app(Arc::new(router), reqwest::Client::new(), &config);
+    for choice in [json!(null), json!("auto"), json!("none"), json!("required")] {
+        let body = json!({
+            "model": model.path().to_str().unwrap(),
+            "messages": [{"role":"developer", "content":"policy", "tools":[{
+                "type":"function", "function":{"name":"weather", "parameters":{"type":"object"}}
+            }]}],
+            "tool_choice": choice,
+            "max_tokens":1
+        });
+        let response = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 400);
+        let payload = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        assert!(String::from_utf8_lossy(&payload).contains("developer message-local tools"));
+    }
+    assert!(worker.captured().is_empty());
+}
+
+#[tokio::test]
 async fn grpc_custom_role_reaches_worker_with_template_token_ids() {
     let model = fixture::model_fixture();
     let worker = MockVllmRsServer::spawn().await;
