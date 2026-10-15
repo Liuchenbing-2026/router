@@ -47,10 +47,15 @@ Custom text roles are passed to the selected model's renderer rather than
 rejected during request lowering. HF templates receive the original role and
 additional JSON message fields, including nested objects and arrays. Text-only
 content parts are concatenated, consistently with standard text messages.
-`developer` uses the library's standard developer message type. Nonempty or
-malformed message-local `tools` declarations return 400 before worker dispatch,
-including when `tool_choice=none`. An absent, null, or empty `tools` field is
-accepted. This adapter does not yet support developer-local tool declarations.
+`developer` uses the library's standard developer message type and retains its
+message-local function tools, including schema, description, `strict`, and
+`defer_loading`. An absent, null, or empty `tools` field is accepted. The paired
+tool context validates combined request-level and message-local declarations,
+including duplicate names and named tool choices. With declarations present,
+explicit `tool_choice=none` permits rendering; omitted choice resolves to `auto`,
+which requires tool output parsing and returns 400 before worker dispatch.
+`auto`, `required`, and named tool calls likewise remain unsupported. Malformed
+tool declarations return 400 rather than being discarded.
 
 The DeepSeek V4/V4.1 native renderers accept `latest_reminder`. Native renderers
 still reject custom roles they cannot represent; support depends on the model

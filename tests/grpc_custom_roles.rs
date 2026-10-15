@@ -24,7 +24,7 @@ fn expected_ids(model: &tempfile::TempDir, prompt: &str) -> Vec<u32> {
 }
 
 #[tokio::test]
-async fn developer_local_tools_return_400_without_worker_dispatch() {
+async fn active_developer_tools_return_400_without_worker_dispatch() {
     let model = fixture::model_fixture();
     let worker = MockVllmRsServer::spawn().await;
     let config = RouterConfig {
@@ -42,7 +42,12 @@ async fn developer_local_tools_return_400_without_worker_dispatch() {
     .await
     .unwrap();
     let app = common::test_app::create_test_app(Arc::new(router), reqwest::Client::new(), &config);
-    for choice in [json!(null), json!("auto"), json!("none"), json!("required")] {
+    for choice in [
+        json!(null),
+        json!("auto"),
+        json!("required"),
+        json!({"type":"function", "function":{"name":"weather"}}),
+    ] {
         let body = json!({
             "model": model.path().to_str().unwrap(),
             "messages": [{"role":"developer", "content":"policy", "tools":[{
@@ -65,9 +70,77 @@ async fn developer_local_tools_return_400_without_worker_dispatch() {
             .unwrap();
         assert_eq!(response.status(), 400);
         let payload = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-        assert!(String::from_utf8_lossy(&payload).contains("developer message-local tools"));
+        assert!(String::from_utf8_lossy(&payload).contains("active tool calling"));
     }
     assert!(worker.captured().is_empty());
+}
+
+#[tokio::test]
+async fn developer_tools_with_none_keep_template_ids_and_cache_keys() {
+    let model = fixture::model_fixture();
+    let path = model.path().join("tokenizer_config.json");
+    let mut config: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    config["chat_template"] = json!("{% for m in messages %}{{ m.role }}|{{ m.content }}|{{ m.tools[0].function.name }}|{% if m.tools[0].function.strict %}strict{% else %}loose{% endif %}|{% if m.tools[0].function.defer_loading %}lazy{% else %}eager{% endif %}|{{ m.tools[0].function.parameters.properties.city.type }};{% endfor %}");
+    std::fs::write(&path, config.to_string()).unwrap();
+    let worker = MockVllmRsServer::spawn().await;
+    let frontend =
+        EngineFrontend::with_tokenizer_cache(Duration::from_secs(30), Default::default()).unwrap();
+    for name in ["blue", "blue", "red"] {
+        let request: ChatCompletionRequest = serde_json::from_value(json!({
+            "model":model.path().to_str().unwrap(), "tool_choice":"none", "max_tokens":1,
+            "messages":[{"role":"developer", "content":"policy", "tools":[{
+                "type":"function", "defer_loading":true,
+                "function":{"name":name, "strict":true, "defer_loading":false,
+                    "parameters":{"type":"object", "properties":{"city":{"type":"string"}}}}
+            }]}]
+        }))
+        .unwrap();
+        let prepared = frontend.prepare(request).await.unwrap();
+        let expected = expected_ids(
+            &model,
+            &format!("developer|policy|{name}|strict|eager|string;"),
+        );
+        assert_eq!(prepared.tokenized.token_ids.as_ref(), expected.as_slice());
+        let response = frontend.dispatch(&worker.grpc_url, prepared).await;
+        assert_eq!(response.status(), 200);
+        to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(worker.captured().last().unwrap().token_ids, expected);
+    }
+    let stats = frontend.tokenizer_cache_stats().unwrap();
+    assert_eq!((stats.misses, stats.hits), (2, 1));
+}
+
+#[tokio::test]
+async fn developer_and_request_tools_share_name_validation() {
+    let model = fixture::model_fixture();
+    let frontend = EngineFrontend::new();
+    for (choice, initial, expected_error) in [
+        (
+            json!("none"),
+            json!([{"type":"function", "function":{"name":"weather", "parameters":{}}}]),
+            "duplicate",
+        ),
+        (
+            json!({"type":"function", "function":{"name":"absent"}}),
+            json!([]),
+            "absent",
+        ),
+    ] {
+        let request: ChatCompletionRequest = serde_json::from_value(json!({
+            "model":model.path().to_str().unwrap(), "tool_choice":choice, "tools":initial,
+            "messages":[{"role":"developer", "content":"policy", "tools":[{
+                "type":"function", "function":{"name":"weather", "parameters":{}}
+            }]}]
+        }))
+        .unwrap();
+        let error = frontend
+            .prepare(request)
+            .await
+            .err()
+            .expect("invalid tool context must fail");
+        assert!(error.to_string().to_lowercase().contains(expected_error));
+    }
 }
 
 #[tokio::test]
