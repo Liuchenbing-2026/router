@@ -1,5 +1,6 @@
 //! HTTP router implementations
 
+mod bidirectional_kv;
 pub mod dp_utils;
 mod epd;
 pub mod logprobs_merge;

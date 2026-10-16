@@ -189,6 +189,7 @@ impl Router {
 
         Ok(config::RouterConfig {
             epd: None,
+            bidirectional_kv: None,
             mode,
             policy,
             host: self.host.clone(),

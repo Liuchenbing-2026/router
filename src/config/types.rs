@@ -14,6 +14,9 @@ pub struct RouterConfig {
     /// Optional encoder orchestration for E+PD or E/P/D routing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub epd: Option<EpdConfig>,
+    /// Optional single-use decode-to-prefill metadata reuse (static NIXL P/D).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bidirectional_kv: Option<BidirectionalKvConfig>,
     /// Routing mode configuration
     pub mode: RoutingMode,
     /// Worker connection mode
@@ -95,6 +98,29 @@ pub struct RouterConfig {
 
 fn default_profile_timeout_secs() -> u64 {
     10
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct BidirectionalKvConfig {
+    pub max_entries: usize,
+    pub max_bytes: usize,
+    pub max_entry_bytes: usize,
+    pub max_tokens: usize,
+    /// Must be shorter than the engine's decoder_kv_blocks_ttl.
+    pub ttl_secs: u64,
+}
+
+impl Default for BidirectionalKvConfig {
+    fn default() -> Self {
+        Self {
+            max_entries: 1024,
+            max_bytes: 16 * 1024 * 1024,
+            max_entry_bytes: 1024 * 1024,
+            max_tokens: 65536,
+            ttl_secs: 450,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -921,6 +947,7 @@ impl Default for RouterConfig {
             enable_profiling: false,
             profile_timeout_secs: default_profile_timeout_secs(),
             epd: None,
+            bidirectional_kv: None,
             kv_connector: KvConnector::default(),
             program_scheduling: None,
         }
@@ -1639,6 +1666,7 @@ mod tests {
             enable_profiling: false,
             profile_timeout_secs: default_profile_timeout_secs(),
             epd: None,
+            bidirectional_kv: None,
             kv_connector: KvConnector::default(),
             program_scheduling: None,
         };
@@ -1707,6 +1735,7 @@ mod tests {
             enable_profiling: false,
             profile_timeout_secs: default_profile_timeout_secs(),
             epd: None,
+            bidirectional_kv: None,
             kv_connector: KvConnector::default(),
             program_scheduling: None,
         };
@@ -1771,6 +1800,7 @@ mod tests {
             enable_profiling: false,
             profile_timeout_secs: default_profile_timeout_secs(),
             epd: None,
+            bidirectional_kv: None,
             kv_connector: KvConnector::default(),
             program_scheduling: None,
         };

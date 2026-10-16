@@ -24,6 +24,34 @@ impl ConfigValidator {
             Self::validate_program_scheduling(program_scheduling)?;
         }
         Self::validate_epd(config)?;
+        if let Some(bidir) = &config.bidirectional_kv {
+            if !matches!(
+                config.mode,
+                RoutingMode::VllmPrefillDecode {
+                    discovery_address: None,
+                    ..
+                }
+            ) || config.kv_connector != KvConnector::Nixl
+                || config.intra_node_data_parallel_size != 1
+                || config.enable_igw
+                || config.epd.is_some()
+            {
+                return Err(ConfigError::ValidationFailed { reason: "bidirectional_kv requires static NIXL pull P/D, DP=1, proxy mode, and no EPD".into() });
+            }
+            if bidir.max_entries == 0
+                || bidir.max_bytes == 0
+                || bidir.max_entry_bytes == 0
+                || bidir.max_tokens == 0
+                || bidir.ttl_secs == 0
+                || bidir.max_entry_bytes > bidir.max_bytes
+            {
+                return Err(ConfigError::ValidationFailed {
+                    reason:
+                        "bidirectional_kv limits must be positive and max_entry_bytes <= max_bytes"
+                            .into(),
+                });
+            }
+        }
 
         if let Some(discovery) = &config.discovery {
             Self::validate_discovery(discovery, &config.mode)?;

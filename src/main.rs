@@ -380,6 +380,9 @@ struct CliArgs {
     /// KV connector type for PD disaggregation (nixl or mooncake)
     #[arg(long, value_enum, default_value_t = KvConnector::Nixl)]
     kv_connector: KvConnector,
+    /// Enable bounded, token-verified D-to-P reuse in static NIXL P/D (JSON overrides).
+    #[arg(long)]
+    bidirectional_kv_config: Option<String>,
 }
 
 impl CliArgs {
@@ -612,6 +615,14 @@ impl CliArgs {
             enable_profiling: self.profile,
             profile_timeout_secs: 10, // Default profiling timeout
             kv_connector: self.kv_connector,
+            bidirectional_kv: self
+                .bidirectional_kv_config
+                .as_deref()
+                .map(serde_json::from_str)
+                .transpose()
+                .map_err(|e| ConfigError::ValidationFailed {
+                    reason: format!("Invalid bidirectional KV JSON: {e}"),
+                })?,
             program_scheduling,
         })
     }

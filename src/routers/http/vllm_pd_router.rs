@@ -37,6 +37,7 @@ struct MooncakePrefillInfo {
 /// vLLM PD Router that extends PdRouterBase with vLLM-specific request handling
 #[derive(Debug)]
 pub struct VllmPDRouter {
+    bidirectional_kv: Option<Arc<super::bidirectional_kv::ConversationCache>>,
     epd: Option<super::epd::EncoderStage>,
     /// Underlying PD router for most functionality
     pd_router: PdRouterBase,
@@ -1268,7 +1269,7 @@ impl VllmPDRouter {
     /// during the decode phase. This accurately reflects the sequential nature of PD disaggregation.
     async fn process_vllm_two_stage_request(
         &self,
-        original_request: Value,
+        mut original_request: Value,
         prefill_worker: Arc<dyn Worker>,
         decode_worker: Arc<dyn Worker>,
         path: &str,
@@ -1283,6 +1284,22 @@ impl VllmPDRouter {
             )
                 .into_response());
         }
+
+        let (bidir_turn, remote_kv, bidir_reason) = if let Some(cache) = &self.bidirectional_kv {
+            cache
+                .begin(
+                    &mut original_request,
+                    path,
+                    headers,
+                    prefill_worker.base_url(),
+                    &self.http_client,
+                    std::env::var("OPENAI_API_KEY").ok().as_deref(),
+                    &self.pd_router.worker_registry.get_decode_workers(),
+                )
+                .await
+        } else {
+            (None, None, "disabled")
+        };
 
         // The encoder stage must run before the NIXL concurrent fast path:
         // once a push identity is cached, try_build_concurrent_requests
@@ -1368,6 +1385,9 @@ impl VllmPDRouter {
                 decode_worker.dp_rank(),
             )
             .map_err(|reason| PDRouterError::InvalidConfiguration { reason })?;
+        if let Some(params) = remote_kv {
+            prefill_request["kv_transfer_params"] = params;
+        }
 
         debug!(
             "Added kv_transfer_params to prefill request for {:?} connector",
@@ -1690,7 +1710,7 @@ impl VllmPDRouter {
             .unwrap_or(false);
 
         // If logprobs requested and non-streaming, merge prefill and decode logprobs
-        if needs_logprobs && !is_streaming {
+        let response = if needs_logprobs && !is_streaming {
             debug!("Logprobs requested and non-streaming - merging prefill and decode logprobs");
 
             // Read decode response body
@@ -1758,7 +1778,20 @@ impl VllmPDRouter {
                 .map_err(|e| PDRouterError::NetworkError {
                     message: format!("Failed to build response from {}: {}", decode_url, e),
                 })
+        };
+        let mut response = response?;
+        if self.bidirectional_kv.is_some() {
+            response.headers_mut().insert(
+                "x-router-kv-reuse",
+                axum::http::HeaderValue::from_static(bidir_reason),
+            );
+            metrics::counter!("vllm_router_bidirectional_kv_requests_total", "reason" => bidir_reason).increment(1);
         }
+        Ok(if let Some(turn) = bidir_turn {
+            turn.observe(response, decode_worker)
+        } else {
+            response
+        })
     }
 
     async fn try_build_concurrent_requests(
@@ -1768,7 +1801,7 @@ impl VllmPDRouter {
         decode_worker: &Arc<dyn Worker>,
         path: &str,
     ) -> Option<(Value, Value, String)> {
-        if !matches!(self.kv_connector, KvConnector::Nixl) {
+        if self.bidirectional_kv.is_some() || !matches!(self.kv_connector, KvConnector::Nixl) {
             return None;
         }
 
@@ -2015,6 +2048,7 @@ impl VllmPDRouter {
             );
 
             Ok(Self {
+                bidirectional_kv: None,
                 epd: ctx
                     .router_config
                     .epd
@@ -2110,6 +2144,11 @@ impl VllmPDRouter {
             }
 
             Ok(Self {
+                bidirectional_kv: ctx
+                    .router_config
+                    .bidirectional_kv
+                    .clone()
+                    .map(super::bidirectional_kv::ConversationCache::new),
                 epd: ctx
                     .router_config
                     .epd

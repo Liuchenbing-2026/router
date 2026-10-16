@@ -249,6 +249,8 @@ For detailed configuration options, hash key priorities, and usage examples, see
 
 For the optional agent metadata contract, scheduling enablement, request-scoped hints, and engine KV-control boundary, see [Program Scheduling](docs/program_scheduling.md).
 
+For opt-in, token-verified multi-turn D-to-P metadata reuse in static NIXL P/D, see [Bidirectional KV](docs/bidirectional_kv.md).
+
 ## Advanced Features
 
 ### Kubernetes Service Discovery
