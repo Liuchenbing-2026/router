@@ -383,6 +383,81 @@ async fn real_http_forwarding_selects_dp_rank_and_replaces_client_rank_header() 
 }
 
 #[tokio::test]
+async fn rank_event_gap_preserves_other_rank_credit_in_real_http_dispatch() {
+    let p0 = Publisher::new();
+    let p1 = Publisher::new();
+    let engine = Engine::new("dp-isolation", &[(0, &p0), (1, &p1)]).await;
+    let (router, ctx) = router(&[&engine], 2).await;
+    p0.subscribed().await;
+    p1.subscribed().await;
+    let policy = ctx.policy_registry.get_default_policy();
+    let kv = policy.as_any().downcast_ref::<KvAwarePolicy>().unwrap();
+    let workers = ctx.worker_registry.get_all();
+    p0.send(0, 1, vec![clear()]);
+    p1.send(1, 1, vec![clear(), stored()]);
+    wait_for(kv, &workers, KvRoutingMode::Exact).await;
+
+    p0.send(0, 3, vec![stored()]);
+    let (_, decision) = wait_for(kv, &workers, KvRoutingMode::Degraded).await;
+    assert_eq!(decision.fallback_reason, Some("sequence_gap_or_rollback"));
+    assert_eq!(decision.target.as_ref().unwrap().dp_rank, 1);
+    assert_eq!(decision.scores[0].credited_blocks, 2.0);
+    assert_eq!(decision.scores[1].credited_blocks, 0.0);
+    let response = router
+        .route_typed_request(
+            None,
+            &request(json!([1, 2, 3, 4, 5]), false),
+            "/v1/completions",
+            Some("m"),
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["x-router-kv-mode"], "degraded");
+    assert_eq!(
+        response.headers()["x-router-kv-reason"],
+        "sequence_gap_or_rollback"
+    );
+    let body = axum::body::to_bytes(response.into_body(), 4096)
+        .await
+        .unwrap();
+    let body: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(body["rank"], "1");
+    assert_eq!(body["prompt"], json!([1, 2, 3, 4, 5]));
+    assert!(workers.iter().all(|w| w.load() == 0));
+
+    p0.send(0, 4, vec![clear()]);
+    wait_for(kv, &workers, KvRoutingMode::Exact).await;
+}
+
+#[tokio::test]
+async fn corrupt_worker_events_do_not_revoke_another_instances_cache_credit() {
+    let a = Publisher::new();
+    let b = Publisher::new();
+    let cold = Engine::new("cold", &[(0, &a)]).await;
+    let hot = Engine::new("hot", &[(0, &b)]).await;
+    let policy = policy();
+    let workers = vec![cold.worker(), hot.worker()];
+    attach(&policy, &cold, &[&a]).await;
+    attach(&policy, &hot, &[&b]).await;
+    a.send(0, 1, vec![clear()]);
+    b.send(0, 1, vec![clear(), stored()]);
+    wait_for(&policy, &workers, KvRoutingMode::Exact).await;
+    a.raw(2, b"invalid");
+    let (idx, decision) = wait_for(&policy, &workers, KvRoutingMode::Degraded).await;
+    assert_eq!(idx, 1);
+    assert_eq!(decision.fallback_reason, Some("unavailable"));
+    assert_eq!(decision.scores[0].credited_blocks, 2.0);
+    // Losing the last complete source falls back and stops using all KV credit.
+    b.raw(2, b"invalid");
+    let (_, decision) = wait_for(&policy, &workers, KvRoutingMode::Fallback).await;
+    assert!(decision.scores.iter().all(|s| s.credited_blocks == 0.0));
+    a.send(0, 3, vec![clear()]);
+    wait_for(&policy, &workers, KvRoutingMode::Degraded).await;
+    b.send(0, 3, vec![clear(), stored()]);
+    assert_eq!(wait_for(&policy, &workers, KvRoutingMode::Exact).await.0, 1);
+}
+
+#[tokio::test]
 async fn http_text_and_salted_prompts_fall_back_without_claiming_exact() {
     let publisher = Publisher::new();
     let engine = Engine::new("w", &[(0, &publisher)]).await;
@@ -932,19 +1007,32 @@ async fn grpc_control_discovery_and_prepared_tokens_select_the_holding_rank_on_t
         json!({"model":"m","messages":[{"role":"user","content":"hello"}],"max_tokens":1}),
     )
     .unwrap();
-    let response = router
-        .route_typed_request(None, &request, "/v1/chat/completions", Some("m"))
-        .await;
-    assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(response.headers()["x-router-kv-mode"], "exact");
-    let _ = axum::body::to_bytes(response.into_body(), 16384)
-        .await
-        .unwrap();
+    for (sequence, events, expected_mode) in [
+        (None, Vec::new(), KvRoutingMode::Exact),
+        (Some(3), vec![stored()], KvRoutingMode::Degraded),
+        (Some(4), vec![clear()], KvRoutingMode::Exact),
+    ] {
+        if let Some(sequence) = sequence {
+            p0.send(0, sequence, events);
+        }
+        wait_for(kv, &ctx.worker_registry.get_all(), expected_mode).await;
+        let response = router
+            .route_typed_request(None, &request, "/v1/chat/completions", Some("m"))
+            .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers()["x-router-kv-mode"],
+            expected_mode.as_str()
+        );
+        let _ = axum::body::to_bytes(response.into_body(), 16384)
+            .await
+            .unwrap();
+    }
     let captures = engine.captured.lock().unwrap();
-    assert_eq!(captures.len(), 1);
-    assert_eq!(captures[0].token_ids, vec![1, 2, 3, 4, 5]);
-    assert!(!captures[0].had_text_prompt);
-    assert_eq!(*ranks.lock().unwrap(), vec!["1"]);
+    assert_eq!(captures.len(), 3);
+    assert!(captures.iter().all(|c| c.token_ids == vec![1, 2, 3, 4, 5]));
+    assert!(captures.iter().all(|c| !c.had_text_prompt));
+    assert_eq!(*ranks.lock().unwrap(), vec!["1", "1", "1"]);
     assert!(ctx.worker_registry.get_all().iter().all(|w| w.load() == 0));
     task.abort();
 }

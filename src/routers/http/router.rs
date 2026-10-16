@@ -1261,10 +1261,7 @@ impl Router {
                     }
                 }
                 if kv_policy.is_some() {
-                    let mode = kv_decision.as_ref().map_or("fallback", |d| match d.mode {
-                        crate::kv_index::routing::KvRoutingMode::Exact => "exact",
-                        crate::kv_index::routing::KvRoutingMode::Fallback => "fallback",
-                    });
+                    let mode = kv_decision.as_ref().map_or("fallback", |d| d.mode.as_str());
                     let reason = kv_decision.as_ref().and_then(|d| d.fallback_reason).unwrap_or(if forced_worker_url.is_some() { "program_binding" } else { "verified" });
                     response.headers_mut().insert("x-router-kv-mode", HeaderValue::from_static(mode));
                     response.headers_mut().insert("x-router-kv-reason", HeaderValue::from_static(reason));

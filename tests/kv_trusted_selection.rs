@@ -124,9 +124,9 @@ fn a_gap_requires_reconciliation_even_after_replay_deltas() {
     t.advance(&target(1), 0, 9, now);
     assert_eq!(
         selector()
-            .select(&NeverQuery, &query(), &candidates(), &t, now)
+            .select(&index(), &query(), &candidates(), &t, now)
             .mode,
-        KvRoutingMode::Fallback
+        KvRoutingMode::Degraded
     );
     assert!(!t.reconcile(&target(1), 0, 8, now));
     assert!(t.reconcile(&target(1), 0, 9, now));
@@ -144,12 +144,10 @@ fn restarting_and_old_epoch_events_cannot_credit_prior_residency() {
     t.register(target(1), 1, now);
     assert!(!t.reconcile(&target(1), 0, 5, now));
     assert!(!t.advance(&target(1), 0, 6, now));
-    assert_eq!(
-        selector()
-            .select(&NeverQuery, &query(), &candidates(), &t, now)
-            .mode,
-        KvRoutingMode::Fallback
-    );
+    let decision = selector().select(&index(), &query(), &candidates(), &t, now);
+    assert_eq!(decision.mode, KvRoutingMode::Degraded);
+    assert!(decision.scores.iter().all(|s| s.credited_blocks == 0.0));
+    assert_eq!(decision.target, Some(target(0)));
 }
 #[test]
 fn duplicate_messages_do_not_keep_stale_sources_fresh() {
@@ -169,9 +167,9 @@ fn a_rollback_cannot_lower_the_reconciliation_watermark() {
     assert!(!t.reconcile(&target(1), 0, 3, now));
     assert_eq!(
         selector()
-            .select(&NeverQuery, &query(), &candidates(), &t, now)
+            .select(&index(), &query(), &candidates(), &t, now)
             .mode,
-        KvRoutingMode::Fallback
+        KvRoutingMode::Degraded
     );
     assert!(t.reconcile(&target(1), 0, 5, now));
 }
@@ -206,6 +204,7 @@ fn invalid_cost_configuration_is_rejected() {
 fn disconnected_or_removed_sources_force_load_fallback() {
     let now = Instant::now();
     let mut t = trust(now);
+    t.mark_unavailable(&target(0));
     t.mark_unavailable(&target(1));
     assert_eq!(
         selector()
@@ -213,6 +212,7 @@ fn disconnected_or_removed_sources_force_load_fallback() {
             .fallback_reason,
         Some("unavailable")
     );
+    t.remove(&target(0));
     t.remove(&target(1));
     assert_eq!(
         selector()
@@ -299,4 +299,110 @@ fn timestamps_ahead_of_the_query_clock_do_not_establish_freshness() {
     let d = selector().select(&NeverQuery, &query(), &candidates(), &trust(future), now);
     assert_eq!(d.mode, KvRoutingMode::Fallback);
     assert_eq!(d.fallback_reason, Some("stale"));
+}
+
+#[test]
+fn a_gap_isolates_one_rank_without_discarding_other_ranks_verified_prefixes() {
+    let now = Instant::now();
+    let mut t = trust(now);
+    // Rank 0 loses an event; rank 1 still has a complete, fresh view.
+    assert!(t.advance(&target(0), 0, 7, now));
+    let d = selector().select(&index(), &query(), &candidates(), &t, now);
+    assert_eq!(d.to_json()["mode"], "degraded");
+    assert_eq!(d.target, Some(target(1)));
+    assert_eq!(d.scores[0].credited_blocks, 2.0);
+    assert_eq!(
+        d.scores
+            .iter()
+            .find(|s| s.target == target(0))
+            .unwrap()
+            .credited_blocks,
+        0.0
+    );
+    assert!(t.advance(&target(0), 0, 8, now));
+    assert_eq!(
+        selector()
+            .select(&index(), &query(), &candidates(), &t, now)
+            .to_json()["mode"],
+        "degraded",
+        "a live delta must not repair a missing completeness barrier"
+    );
+    assert!(t.reconcile(&target(0), 0, 8, now));
+    assert_eq!(
+        selector()
+            .select(&index(), &query(), &candidates(), &t, now)
+            .mode,
+        KvRoutingMode::Exact
+    );
+}
+
+#[test]
+fn degraded_sources_receive_zero_credit_even_when_the_index_retains_their_blocks() {
+    let now = Instant::now();
+    let mut t = trust(now);
+    t.mark_unavailable(&target(1));
+    let d = selector().select(&index(), &query(), &candidates(), &t, now);
+    assert_eq!(d.mode, KvRoutingMode::Degraded);
+    assert_eq!(d.target, Some(target(0)));
+    assert!(d.scores.iter().all(|s| s.credited_blocks == 0.0));
+    let receipt = d.to_json();
+    let failed = receipt["scores"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|score| score["target"]["dp_rank"] == 1)
+        .unwrap();
+    assert_eq!(failed["cache_trust_reason"], "unavailable");
+}
+
+#[test]
+fn source_freshness_is_evaluated_independently_at_selection_time() {
+    let now = Instant::now();
+    let later = now + Duration::from_secs(11);
+    let mut t = trust(now);
+    assert!(t.advance(&target(1), 0, 6, later));
+    let d = selector().select(&index(), &query(), &candidates(), &t, later);
+    assert_eq!(d.mode, KvRoutingMode::Degraded);
+    assert_eq!(d.target, Some(target(1)));
+    assert_eq!(d.fallback_reason, Some("stale"));
+    assert_eq!(d.scores[0].credited_blocks, 2.0);
+}
+
+#[test]
+fn degraded_targets_remain_eligible_by_load_but_cannot_claim_cache_hits() {
+    let now = Instant::now();
+    let mut t = trust(now);
+    t.mark_unavailable(&target(0));
+    let mut c = candidates();
+    c[1].active_requests = 100;
+    let load_weighted = TrustedKvSelector::new(0.1, 0.5, Duration::from_secs(10)).unwrap();
+    let d = load_weighted.select(&index(), &query(), &c, &t, now);
+    assert_eq!(d.mode, KvRoutingMode::Degraded);
+    assert_eq!(d.target, Some(target(0)));
+    assert_eq!(d.scores[0].credited_blocks, 0.0);
+}
+
+#[test]
+fn unhealthy_sources_do_not_degrade_the_eligible_pool() {
+    let now = Instant::now();
+    let mut t = trust(now);
+    t.mark_unavailable(&target(0));
+    let mut c = candidates();
+    c[0].healthy = false;
+    let d = selector().select(&index(), &query(), &c, &t, now);
+    assert_eq!(d.mode, KvRoutingMode::Exact);
+    assert_eq!(d.target, Some(target(1)));
+    assert_eq!(d.scores.len(), 1);
+}
+
+#[test]
+fn no_trusted_sources_skip_index_queries_and_explain_each_source() {
+    let now = Instant::now();
+    let mut t = trust(now);
+    t.mark_unavailable(&target(0));
+    t.remove(&target(1));
+    let d = selector().select(&NeverQuery, &query(), &candidates(), &t, now);
+    assert_eq!(d.mode, KvRoutingMode::Fallback);
+    assert!(d.scores.iter().all(|s| s.cache_trust_reason.is_some()));
+    assert!(d.scores.iter().all(|s| s.credited_blocks == 0.0));
 }

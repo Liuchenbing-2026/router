@@ -74,9 +74,25 @@ are rejected at configuration validation.
 
 ## Selection, load and observability
 
-All healthy candidates must share a cache identity and have fresh, reconciled
-sources. Otherwise the entire eligible pool uses deterministic least-load
-fallback without querying untrusted residency. Exact selection credits only
+All healthy candidates must share a cache identity. Missing discovery metadata,
+unsupported request namespaces or incompatible identities still cause pool-wide
+least-load fallback. Within a validated identity, trust is evaluated per source:
+
+| Eligible sources | Routing mode | Cache credit |
+| --- | --- | --- |
+| All fresh and reconciled | `exact` | All eligible sources |
+| Some fresh and reconciled | `degraded` | Only fresh, reconciled sources |
+| None fresh and reconciled | `fallback` | None; the index is not queried |
+
+A gap, restart, invalid frame or stale source cannot discard another rank's
+verified prefix. The affected target remains eligible by load, with zero cache
+credit, until its own completeness barrier restores trust. Unhealthy targets
+are excluded from both selection and the eligible pool's trust assessment.
+The decision's `fallback_reason` field explains both partial degradation and
+full fallback; each candidate's `cache_trust_reason` identifies why its credit
+was suppressed. Both contain bounded diagnostic strings, never event payloads.
+
+Selection credits only
 contiguous Device prefixes of complete blocks; the final prompt token is not
 credited. It blends uncached-prefix fraction and normalized active request
 load using `cache_weight`. This is a routing heuristic, not a calibrated
@@ -88,7 +104,7 @@ once. HTTP streaming polls upstream with downstream demand and does not create
 an unbounded forwarding queue. The existing gRPC producer holder handles
 terminal and dropped-body cleanup.
 
-Responses expose `x-router-kv-mode` (`exact` or `fallback`) and
+Responses expose `x-router-kv-mode` (`exact`, `degraded` or `fallback`) and
 `x-router-kv-reason`. Debug route receipts contain target/rank and candidate
 scores, never prompt text or token IDs. Prometheus counters are
 `router_kv_decisions_total{mode,reason}` and
@@ -126,6 +142,32 @@ The integration tests use TCP ZMQ, HTTP and tonic services, actual index
 residency/eviction, DP metadata and cancellation. They establish software
 behavior; real model reuse, engine acceptance, NPU/GPU performance, hybrid
 aggregation and HA remain separate acceptance work.
+
+### Source isolation acceptance, 2026-10-17
+
+The branch `feat/rfc294-source-isolation-20261017` extends the fixed base
+`972b7c78d3abdea2ea920372ebbf6c632d8fc73a`. Before the change, the regression
+`a_gap_isolates_one_rank_without_discarding_other_ranks_verified_prefixes`
+failed: one rank's sequence gap changed the whole pool to `fallback` even
+though another rank retained a fresh, reconciled prefix.
+
+The updated checks cover mixed trusted/untrusted sources, retained but untrusted
+index entries, source-local freshness, least-load eligibility, clear barriers,
+HTTP DP forwarding and native tonic metadata through exact/degraded/exact
+transitions. They use real loopback network transports and simulated engines;
+they do not execute a model or allocate accelerators. The earlier device
+measurements below belong to the fixed older revision, not this change.
+
+The CPU environment is the existing
+`quay.nju.edu.cn/ascend/vllm-omni:v0.30.0` container, image ID
+`sha256:96c8901953dbe758199d97795279762131b58faadb02fa593289ea01e3e68dbd`,
+with the repository digest documented below, Rust 1.95.0, two Cargo build jobs,
+four CPUs and 12 GiB RAM. No accelerator devices are mounted. Rust dependencies,
+including the vLLM 0.29.0 chat/tokenizer/text libraries, are fixed by Cargo.lock.
+The image and already-installed toolchain were reused; an empty-image rebuild
+was not performed. Run the CPU commands above from the task branch to reproduce
+the software checks. No performance benchmark or model-quality evaluation was
+run for source isolation; existing examples remain separate device acceptance.
 
 ## Real Ascend acceptance, 2026-10-15
 

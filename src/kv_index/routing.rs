@@ -1,7 +1,7 @@
 //! Conservative, single-group KV selection over the existing placement index.
 //!
-//! This is a library building block, not a registered Router policy. Callers
-//! provide engine-owned identities and fresh load observations, and establish
+//! The registered runtime and other library callers provide engine-owned
+//! identities and fresh load observations, and establish
 //! trust only after a validated snapshot or clear/reconciliation barrier.
 
 use std::collections::HashMap;
@@ -156,7 +156,18 @@ pub struct KvRoutingCandidate {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KvRoutingMode {
     Exact,
+    Degraded,
     Fallback,
+}
+
+impl KvRoutingMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Exact => "exact",
+            Self::Degraded => "degraded",
+            Self::Fallback => "fallback",
+        }
+    }
 }
 
 /// Structured decision evidence; contains no prompt text or token IDs.
@@ -166,6 +177,9 @@ pub struct KvCandidateScore {
     pub credited_blocks: f64,
     pub normalized_load: f64,
     pub cost: f64,
+    /// None only for a fresh, reconciled source. The reason is a bounded
+    /// diagnostic, never a source name or untrusted event payload.
+    pub cache_trust_reason: Option<&'static str>,
 }
 
 #[derive(Debug, Clone)]
@@ -187,11 +201,12 @@ impl KvRoutingDecision {
         };
         serde_json::json!({
             "target": self.target.as_ref().map(target),
-            "mode": match self.mode { KvRoutingMode::Exact => "exact", KvRoutingMode::Fallback => "fallback" },
+            "mode": self.mode.as_str(),
             "fallback_reason": self.fallback_reason,
             "scores": self.scores.iter().map(|s| serde_json::json!({
                 "target": target(&s.target), "credited_blocks": s.credited_blocks,
-                "normalized_load": s.normalized_load, "cost": s.cost
+                "normalized_load": s.normalized_load, "cost": s.cost,
+                "cache_trust_reason": s.cache_trust_reason
             })).collect::<Vec<_>>()
         })
     }
@@ -228,8 +243,10 @@ impl TrustedKvSelector {
     }
 
     /// Query a model-scoped index and choose a concrete instance/DP rank.
-    /// Any untrusted healthy candidate causes a conservative pool-wide
-    /// least-load fallback, without querying or crediting the KV provider.
+    /// Untrusted sources receive no cache credit. Fresh, reconciled sources
+    /// retain their credit in degraded mode; if none remain, use least load
+    /// without querying the provider. Unsafe identity/request namespaces must
+    /// be rejected by the caller before reaching this selector.
     pub fn select(
         &self,
         provider: &dyn TieredMatchProvider,
@@ -239,24 +256,29 @@ impl TrustedKvSelector {
         now: Instant,
     ) -> KvRoutingDecision {
         let eligible: Vec<_> = candidates.iter().filter(|c| c.healthy).collect();
-        let fallback = if eligible.is_empty() {
+        let source_failures: Vec<_> = eligible
+            .iter()
+            .map(|c| trust.failure(&c.target, now, self.max_event_age))
+            .collect();
+        let reason = if eligible.is_empty() {
             Some("no_healthy_targets")
         } else if query.local_hashes.is_empty() {
             Some("empty_query")
         } else {
-            eligible
-                .iter()
-                .find_map(|c| trust.failure(&c.target, now, self.max_event_age))
+            source_failures.iter().copied().flatten().min()
         };
-        let mode = if fallback.is_some() {
+        let has_trusted_source = source_failures.iter().any(Option::is_none);
+        let mode = if eligible.is_empty() || query.local_hashes.is_empty() || !has_trusted_source {
             KvRoutingMode::Fallback
+        } else if reason.is_some() {
+            KvRoutingMode::Degraded
         } else {
             KvRoutingMode::Exact
         };
-        let matches = if mode == KvRoutingMode::Exact {
-            provider.find_tiered_matches(query)
-        } else {
+        let matches = if mode == KvRoutingMode::Fallback {
             Vec::new()
+        } else {
+            provider.find_tiered_matches(query)
         };
         let maximum_load = eligible
             .iter()
@@ -266,10 +288,13 @@ impl TrustedKvSelector {
         let query_length = query.local_hashes.len() as f64;
         let mut scores: Vec<_> = eligible
             .iter()
-            .map(|candidate| {
+            .zip(source_failures)
+            .map(|(candidate, cache_trust_reason)| {
                 let mut credited_blocks = 0.0_f64;
                 for hit in matches.iter().filter(|m| {
-                    m.target == candidate.target && query.tiers_of_interest.contains(&m.tier)
+                    cache_trust_reason.is_none()
+                        && m.target == candidate.target
+                        && query.tiers_of_interest.contains(&m.tier)
                 }) {
                     // Later held segments cannot be credited across a missing
                     // leading prefix. The multi-segment transfer scorer is later work.
@@ -301,6 +326,7 @@ impl TrustedKvSelector {
                     credited_blocks,
                     normalized_load,
                     cost,
+                    cache_trust_reason,
                 }
             })
             .collect();
@@ -313,7 +339,7 @@ impl TrustedKvSelector {
         KvRoutingDecision {
             target: scores.first().map(|s| s.target.clone()),
             mode,
-            fallback_reason: fallback,
+            fallback_reason: reason,
             scores,
         }
     }
