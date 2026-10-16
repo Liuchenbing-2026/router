@@ -512,6 +512,14 @@ async fn messages_handler(
         .and_then(|v| v.as_str())
         .unwrap_or("mock-model");
 
+    let is_stream = payload
+        .get("stream")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    if is_stream {
+        return messages_stream_response(model);
+    }
+
     Json(json!({
         "id": format!("msg_{}", Uuid::new_v4()),
         "type": "message",
@@ -530,6 +538,71 @@ async fn messages_handler(
         }
     }))
     .into_response()
+}
+
+/// Anthropic Messages streaming response.
+///
+/// Emits the canonical event sequence (`message_start` → `content_block_*` →
+/// `message_delta` → `message_stop`) so tests can assert that the router hands
+/// streaming Anthropic responses through untouched. Each event carries the
+/// `event:` name that Anthropic SDK clients dispatch on.
+fn messages_stream_response(model: &str) -> Response {
+    let message_id = format!("msg_{}", Uuid::new_v4());
+    let events = vec![
+        Event::default().event("message_start").data(
+            json!({
+                "type": "message_start",
+                "message": {
+                    "id": message_id,
+                    "type": "message",
+                    "role": "assistant",
+                    "model": model,
+                    "content": [],
+                    "stop_reason": null,
+                    "stop_sequence": null,
+                    "usage": {"input_tokens": 10, "output_tokens": 1}
+                }
+            })
+            .to_string(),
+        ),
+        Event::default().event("content_block_start").data(
+            json!({
+                "type": "content_block_start",
+                "index": 0,
+                "content_block": {"type": "text", "text": ""}
+            })
+            .to_string(),
+        ),
+        Event::default().event("content_block_delta").data(
+            json!({
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {
+                    "type": "text_delta",
+                    "text": "This is a mock Anthropic Messages response."
+                }
+            })
+            .to_string(),
+        ),
+        Event::default()
+            .event("content_block_stop")
+            .data(json!({"type": "content_block_stop", "index": 0}).to_string()),
+        Event::default().event("message_delta").data(
+            json!({
+                "type": "message_delta",
+                "delta": {"stop_reason": "end_turn", "stop_sequence": null},
+                "usage": {"output_tokens": 5}
+            })
+            .to_string(),
+        ),
+        Event::default()
+            .event("message_stop")
+            .data(json!({"type": "message_stop"}).to_string()),
+    ];
+
+    Sse::new(stream::iter(events.into_iter().map(Ok::<_, Infallible>)))
+        .keep_alive(KeepAlive::default())
+        .into_response()
 }
 
 async fn completions_handler(

@@ -2719,4 +2719,77 @@ mod anthropic_messages_tests {
         let resp = app.oneshot(without_key).await.unwrap();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
+
+    /// Claude Code and the Anthropic SDKs stream by default, so the streaming
+    /// path matters as much as the buffered one: every `event:` name must
+    /// arrive in order and the protocol header must still reach the worker.
+    #[tokio::test]
+    async fn test_v1_messages_streaming_passthrough() {
+        let (_worker, url, port) = start_worker().await;
+
+        let config = make_config(vec![url], None);
+        let app_context = common::create_test_context(config.clone());
+        let router: Arc<dyn RouterTrait> =
+            Arc::from(RouterFactory::create_router(&app_context).await.unwrap());
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+        let app = common::test_app::create_test_app(router, Client::new(), &config);
+
+        let mut payload = messages_payload();
+        payload["stream"] = json!(true);
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/v1/messages")
+            .header(CONTENT_TYPE, "application/json")
+            .header("anthropic-version", "2023-06-01")
+            .body(Body::from(serde_json::to_string(&payload).unwrap()))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let text = String::from_utf8(body.to_vec()).unwrap();
+
+        // The six canonical Anthropic events must appear in order; a client
+        // dispatches on the `event:` name, so a reordered or dropped event
+        // breaks stream assembly.
+        let mut cursor = 0;
+        for event in [
+            "message_start",
+            "content_block_start",
+            "content_block_delta",
+            "content_block_stop",
+            "message_delta",
+            "message_stop",
+        ] {
+            let needle = format!("event: {event}");
+            let offset = text[cursor..]
+                .find(&needle)
+                .unwrap_or_else(|| panic!("streaming body is missing {needle}:\n{text}"));
+            cursor += offset + needle.len();
+        }
+        assert!(
+            text.contains("text_delta"),
+            "streaming body lost the content delta payload:\n{text}"
+        );
+
+        let captured = get_captured_requests(port);
+        let messages_request = captured
+            .iter()
+            .find(|r| r.path == "/v1/messages")
+            .expect("worker should have received the streaming /v1/messages request");
+        assert_eq!(
+            messages_request
+                .headers
+                .get("anthropic-version")
+                .and_then(|v| v.first())
+                .map(String::as_str),
+            Some("2023-06-01"),
+            "anthropic-version must survive the streaming path too"
+        );
+    }
 }
