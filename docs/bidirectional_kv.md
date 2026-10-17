@@ -42,7 +42,7 @@ NIXL is not a validated substitute for CUDA device-buffer NIXL.
 ### Ascend NPU path on v0.30.0rc2
 
 Use `--kv-connector mooncake-pull` with the companion
-[Ascend adaptation](https://github.com/Liuchenbing-2026/vllm-ascend/tree/16022133a26f45413042bcca06d9efae64606437),
+[Ascend adaptation](https://github.com/Liuchenbing-2026/vllm-ascend/tree/dda01353a89c8f1ab1b5b2a9322ec1f7be76f7b1),
 based on Ascend `v0.30.0rc2` (`8fde6d4e335fe300e2b949aab0e31659cce0811d`).
 The rc2 Dockerfile pairs it with core vLLM `v0.30.0`; record the actual image
 digest and installed versions during validation.
@@ -62,10 +62,13 @@ P-side `vllm:mooncake_bytes_transferred_sum`. The gain and token-ID acceptance
 criteria remain the same. CPU mock success does not establish physical NPU
 transfer or TTFT improvement. Integrated device/model acceptance is pending.
 On the companion rc2 image, 217 Mooncake CPU tests passed. The updated Router
-passed 780 selected Rust tests and strict Clippy. A standalone NPU-buffer test
-verified both 4 MiB directions but failed native teardown, so its overall
-device verdict remains failed. No integrated NPU-model or TTFT result is
-available. See the companion archive for the exact environment and limitations.
+passed 780 selected Rust tests and strict Clippy. A standalone NPU-buffer
+diagnostic initially failed native teardown. Selecting the device before
+importing Mooncake fixed it: two real-device round trips verified both 4 MiB
+directions and exited normally. Restoring the old import order reproduced
+both worker aborts. This is a diagnostic-entry fix; integrated engine/model
+correctness and TTFT remain unmeasured. See the companion archive for the
+exact environment and limitations.
 
 ## Client contract and prefix correctness
 
@@ -167,12 +170,12 @@ It reused installed tools and dependency caches; it was not a clean image build.
 | Library tests, including nine new lifetime/protocol tests | 767 passed |
 | Native CLI unit tests | 4 passed |
 | Bidirectional configuration tests | 2 passed |
-| Bidirectional TCP tests | 2 passed |
+| Bidirectional TCP tests | 3 passed |
 | Existing P/D integration tests | 4 passed |
-| Total selected Rust tests | 779 passed, zero failed/ignored |
+| Total selected Rust tests | 780 passed, zero failed/ignored |
 | Clippy | all targets, all features, `-D warnings` passed |
 | Format | passed |
-| Physical D→P transfer and TTFT gain | not measured |
+| Integrated engine KV/model correctness and TTFT gain | not measured |
 
 Separate real Rust-binary/TCP-mock probes observed no D metadata on the second
 P request in the earlier delivered binary, and the expected D metadata in the
