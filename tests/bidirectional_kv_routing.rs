@@ -64,6 +64,12 @@ async fn tokenize(State(seen): State<Seen>, Json(body): Json<Value>) -> Json<Val
     Json(json!({"tokens":ids,"count":5,"max_model_len":8192}))
 }
 async fn fixture() -> (Box<dyn RouterTrait>, Seen, tokio::task::JoinHandle<()>) {
+    fixture_with_connector("nixl").await
+}
+
+async fn fixture_with_connector(
+    connector: &str,
+) -> (Box<dyn RouterTrait>, Seen, tokio::task::JoinHandle<()>) {
     let seen: Seen = Arc::new(Mutex::new(Vec::new()));
     let app = Router::new()
         .route("/p/health", get(|| async { "ok" }))
@@ -94,6 +100,7 @@ async fn fixture() -> (Box<dyn RouterTrait>, Seen, tokio::task::JoinHandle<()>) 
     // JSON keeps this test buildable against the unmodified baseline, which ignores the new field.
     let mut config = serde_json::to_value(config).unwrap();
     config["bidirectional_kv"] = json!({});
+    config["kv_connector"] = json!(connector);
     let config: RouterConfig = serde_json::from_value(config).unwrap();
     let context = Arc::new(
         vllm_router_rs::server::AppContext::new(config, reqwest::Client::new(), 64, None, vec![])
@@ -101,6 +108,25 @@ async fn fixture() -> (Box<dyn RouterTrait>, Seen, tokio::task::JoinHandle<()>) 
     );
     let router = RouterFactory::create_router(&context).await.unwrap();
     (router, seen, task)
+}
+
+#[tokio::test]
+async fn mooncake_pull_uses_response_metadata_without_push_bootstrap() {
+    let (router, seen, task) = fixture_with_connector("mooncake-pull").await;
+    for (ids, expected) in [(vec![1, 2], "miss"), (vec![1, 2, 3, 4, 9], "candidate")] {
+        let request = serde_json::from_value(json!({"model":"m","prompt":ids,"max_tokens":2,"return_token_ids":true,"conversation_id":"moon","stream":true})).unwrap();
+        let response = router.route_completion(None, &request, Some("m")).await;
+        assert!(response.status().is_success());
+        assert_eq!(response.headers()["x-router-kv-reuse"], expected);
+        response.into_body().collect().await.unwrap();
+    }
+    let seen = seen.lock().unwrap();
+    let prefills: Vec<_> = seen.iter().filter(|(phase, _)| phase == "P").collect();
+    assert_eq!(
+        prefills[1].1["kv_transfer_params"]["remote_engine_id"],
+        "D-epoch-1"
+    );
+    task.abort();
 }
 
 #[tokio::test]

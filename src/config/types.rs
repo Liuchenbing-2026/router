@@ -14,7 +14,7 @@ pub struct RouterConfig {
     /// Optional encoder orchestration for E+PD or E/P/D routing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub epd: Option<EpdConfig>,
-    /// Optional single-use decode-to-prefill metadata reuse (static NIXL P/D).
+    /// Optional single-use decode-to-prefill metadata reuse (static pull P/D).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bidirectional_kv: Option<BidirectionalKvConfig>,
     /// Routing mode configuration
@@ -582,6 +582,10 @@ pub enum KvConnector {
     #[serde(rename = "mooncake")]
     #[value(name = "mooncake")]
     Mooncake,
+    /// Ascend Mooncake pull-based KV transfer (connector V2)
+    #[serde(rename = "mooncake-pull")]
+    #[value(name = "mooncake-pull")]
+    MooncakePull,
     /// MoRI-IO KV transfer
     #[serde(rename = "moriio")]
     #[value(name = "moriio")]

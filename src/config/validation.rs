@@ -31,12 +31,14 @@ impl ConfigValidator {
                     discovery_address: None,
                     ..
                 }
-            ) || config.kv_connector != KvConnector::Nixl
-                || config.intra_node_data_parallel_size != 1
+            ) || !matches!(
+                config.kv_connector,
+                KvConnector::Nixl | KvConnector::MooncakePull
+            ) || config.intra_node_data_parallel_size != 1
                 || config.enable_igw
                 || config.epd.is_some()
             {
-                return Err(ConfigError::ValidationFailed { reason: "bidirectional_kv requires static NIXL pull P/D, DP=1, proxy mode, and no EPD".into() });
+                return Err(ConfigError::ValidationFailed { reason: "bidirectional_kv requires static NIXL or Mooncake pull P/D, DP=1, proxy mode, and no EPD".into() });
             }
             if bidir.max_entries == 0
                 || bidir.max_bytes == 0

@@ -20,6 +20,9 @@ fn config() -> RouterConfig {
 fn disabled_by_default_and_static_pull_is_valid() {
     assert!(RouterConfig::default().bidirectional_kv.is_none());
     ConfigValidator::validate(&config()).unwrap();
+    let mut mooncake_pull = config();
+    mooncake_pull.kv_connector = KvConnector::MooncakePull;
+    ConfigValidator::validate(&mooncake_pull).unwrap();
     assert!(serde_json::from_str::<BidirectionalKvConfig>(r#"{"misspelled_limit":8}"#).is_err());
 }
 

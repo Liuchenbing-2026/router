@@ -76,7 +76,7 @@ def _measure(args, directory, records):
                                     first_token = time.perf_counter() - started
                                 output.extend(delta)
                                 finished |= choice.get("finish_reason") in ("stop", "length")
-                    if not done or not finished or first_token is None or not output:
+                    if not done or not finished or first_token is None or len(output) != args.output_tokens:
                         raise RuntimeError("Incomplete stream or missing raw output token IDs")
                     record.update({"ttft_seconds": first_token,
                                    "latency_seconds": time.perf_counter() - started,
@@ -90,7 +90,7 @@ def _measure(args, directory, records):
         after = client.get(args.prefill.rstrip("/") + "/metrics")
         after.raise_for_status()
         (directory / "prefill-after.prom").write_text(after.text)
-    name = "vllm:nixl_bytes_transferred_sum"
+    name = f"vllm:{args.transport}_bytes_transferred_sum"
     a, b = metric_sum(before.text, name), metric_sum(after.text, name)
     manifest = {"leg": args.leg, "pair": args.pair, "arguments": vars(args), "complete": True,
                 "client_versions": {"httpx": httpx.__version__},
@@ -122,6 +122,8 @@ def compare(args):
         raise RuntimeError("An arm failed or was interrupted; preserve it and rerun")
     if off["leg"] != "off" or on["leg"] != "on" or off["pair"] != on["pair"]:
         raise RuntimeError("Leg or pair mismatch")
+    if off["arguments"].get("transport", "nixl") != on["arguments"].get("transport", "nixl"):
+        raise RuntimeError("Transport mismatch")
     for option in ("lengths", "conversations", "turns", "output_tokens", "append_tokens", "tool_gap", "model"):
         if off["arguments"][option] != on["arguments"][option]:
             raise RuntimeError("Workload mismatch: " + option)
@@ -169,6 +171,7 @@ if __name__ == "__main__":
     measure_parser.add_argument("--url", required=True)
     measure_parser.add_argument("--prefill", required=True)
     measure_parser.add_argument("--model", required=True)
+    measure_parser.add_argument("--transport", choices=["nixl", "mooncake"], default="nixl")
     measure_parser.add_argument("--leg", choices=["off", "on"], required=True)
     measure_parser.add_argument("--pair", type=int, required=True)
     measure_parser.add_argument("--output", required=True)

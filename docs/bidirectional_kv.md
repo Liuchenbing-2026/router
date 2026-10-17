@@ -1,8 +1,8 @@
-# Token-verified bidirectional KV metadata for static NIXL P/D
+# Token-verified bidirectional KV metadata for static pull P/D
 
 The native Rust router can retain Decode's KV transfer metadata and attach it
 to the next Prefill request. The actual KV remains in the engines and moves
-through their native NIXL pull connector. This does not implement a new engine
+through their native NIXL or Ascend Mooncake pull connector. This does not implement a new engine
 connector or infer physical residency from a conversation identifier.
 
 The feature is disabled by default. Enable it in the native binary:
@@ -13,7 +13,8 @@ vllm-router --vllm-pd-disaggregation --kv-connector nixl \
   --bidirectional-kv-config '{"ttl_secs":450}'
 ```
 
-Current scope is static HTTP NIXL **pull**, DP=1, without EPD, IGW or Program admission.
+Current scope is static HTTP NIXL **pull** or Ascend Mooncake V2 **pull**,
+DP=1, without EPD, IGW or Program admission.
 The Python launcher does not expose this option. Unsupported topologies fail
 configuration validation instead of silently enabling an untested path.
 
@@ -37,6 +38,34 @@ block TTL belong to the engine, not the router. Follow the native
 [NIXL usage guide](https://github.com/vllm-project/vllm/blob/cffc0cfa311f4997be58cfe8f5f6473ab4898269/docs/features/nixl_connector_usage.md)
 for transport and platform requirements. A stock Ascend installation without
 NIXL is not a validated substitute for CUDA device-buffer NIXL.
+
+### Ascend NPU path on v0.30.0rc2
+
+Use `--kv-connector mooncake-pull` with the companion
+[Ascend adaptation](https://github.com/Liuchenbing-2026/vllm-ascend/tree/16022133a26f45413042bcca06d9efae64606437),
+based on Ascend `v0.30.0rc2` (`8fde6d4e335fe300e2b949aab0e31659cce0811d`).
+The rc2 Dockerfile pairs it with core vLLM `v0.30.0`; record the actual image
+digest and installed versions during validation.
+
+The engine connector is `MooncakeConnectorV2`, and the example launcher is
+`examples/disaggregated_prefill_v1/serve_bidirectional_multiturn.sh` in that
+repository. Use TP/PP/DP/PCP/DCP=1, full attention, no speculation, and two free
+NPUs. Both engines enable `bidirectional_kv_xfer`. This is direct READ reuse,
+with a source-page claim before reverse DMA; it does not use a Mooncake Store.
+The legacy `--kv-connector mooncake` selects a different push protocol and is
+unchanged. A receiver crash after claiming can leave source pages pinned until
+the source engine is restarted; this experimental extension has no distributed
+lease recovery.
+
+Run the same benchmark with `measure --transport mooncake`, which reads
+P-side `vllm:mooncake_bytes_transferred_sum`. The gain and token-ID acceptance
+criteria remain the same. CPU mock success does not establish physical NPU
+transfer or TTFT improvement. Integrated device/model acceptance is pending.
+On the companion rc2 image, 217 Mooncake CPU tests passed. The updated Router
+passed 780 selected Rust tests and strict Clippy. A standalone NPU-buffer test
+verified both 4 MiB directions but failed native teardown, so its overall
+device verdict remains failed. No integrated NPU-model or TTFT result is
+available. See the companion archive for the exact environment and limitations.
 
 ## Client contract and prefix correctness
 

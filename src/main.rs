@@ -380,7 +380,7 @@ struct CliArgs {
     /// KV connector type for PD disaggregation (nixl or mooncake)
     #[arg(long, value_enum, default_value_t = KvConnector::Nixl)]
     kv_connector: KvConnector,
-    /// Enable bounded, token-verified D-to-P reuse in static NIXL P/D (JSON overrides).
+    /// Enable bounded, token-verified D-to-P reuse in static pull P/D (JSON overrides).
     #[arg(long)]
     bidirectional_kv_config: Option<String>,
 }

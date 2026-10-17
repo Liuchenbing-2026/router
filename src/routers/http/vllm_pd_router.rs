@@ -189,7 +189,7 @@ impl VllmPDRouter {
                 MORIIO_TRANSFER_PREFIX,
                 Uuid::new_v4().simple()
             )),
-            KvConnector::Nixl => None,
+            KvConnector::Nixl | KvConnector::MooncakePull => None,
         }
     }
 
@@ -250,7 +250,7 @@ impl VllmPDRouter {
                     }))
                 }
             }
-            KvConnector::Nixl => Ok(json!({
+            KvConnector::Nixl | KvConnector::MooncakePull => Ok(json!({
                 "do_remote_decode": true,
                 "do_remote_prefill": false,
                 "remote_engine_id": serde_json::Value::Null,
@@ -320,7 +320,7 @@ impl VllmPDRouter {
                     Some(params)
                 }
             }
-            KvConnector::Nixl => {
+            KvConnector::Nixl | KvConnector::MooncakePull => {
                 if let Some(json) = prefill_response_json {
                     let kvt = json.get("kv_transfer_params")?;
                     if !Self::is_nixl_push_mode(kvt) {
