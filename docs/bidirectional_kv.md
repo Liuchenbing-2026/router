@@ -2,8 +2,9 @@
 
 The native Rust router can retain Decode's KV transfer metadata and attach it
 to the next Prefill request. The actual KV remains in the engines and moves
-through their native NIXL or Ascend Mooncake pull connector. This does not implement a new engine
-connector or infer physical residency from a conversation identifier.
+through their native NIXL or Ascend Mooncake pull connector. This does not
+implement a new engine connector or infer physical residency from a conversation
+identifier.
 
 The feature is disabled by default. Enable it in the native binary:
 
@@ -39,13 +40,23 @@ block TTL belong to the engine, not the router. Follow the native
 for transport and platform requirements. A stock Ascend installation without
 NIXL is not a validated substitute for CUDA device-buffer NIXL.
 
-### Ascend NPU path on v0.30.0rc2
+## Ascend NPU path on v0.30.0rc2
 
 Use `--kv-connector mooncake-pull` with the companion
-[Ascend adaptation](https://github.com/Liuchenbing-2026/vllm-ascend/tree/627b96175bb5d4d64d915282084773f00752191c),
+[Ascend adaptation](https://github.com/Liuchenbing-2026/vllm-ascend/tree/25357495b586a63f92e0b07257cc3ec9783906f9),
 based on Ascend `v0.30.0rc2` (`8fde6d4e335fe300e2b949aab0e31659cce0811d`).
 The rc2 Dockerfile pairs it with core vLLM `v0.30.0`; record the actual image
 digest and installed versions during validation.
+
+Streaming also requires the companion
+[core metadata fix](https://github.com/Liuchenbing-2026/vllm/commit/6c48dce1beb16000ebffd937402608fdd86bde82),
+based on core `ced6857afa0ea7b2e3f0846a62e1394e90f15607`.
+That fixed image's unmodified chat and completion streams omit
+`kv_transfer_params`, so every later turn misses despite successful generation.
+The core fix exposes the descriptor on terminal chunks; it is a separate
+dependency, not part of the Router or Ascend commits. Both OFF and ON must use
+the same patched core. Eight focused CPU stream cases and a 13-case compatibility
+subset passed; these do not establish physical transfer or model performance.
 
 The engine connector is `MooncakeConnectorV2`, and the example launcher is
 `examples/disaggregated_prefill_v1/serve_bidirectional_multiturn.sh` in that
@@ -60,15 +71,31 @@ lease recovery.
 Run the same benchmark with `measure --transport mooncake`, which reads
 P-side `vllm:mooncake_bytes_transferred_sum`. The gain and token-ID acceptance
 criteria remain the same. CPU mock success does not establish physical NPU
-transfer or TTFT improvement. Integrated device/model acceptance is pending.
+transfer or TTFT improvement.
 On the companion rc2 image, 217 Mooncake CPU tests passed. The updated Router
 passed 780 selected Rust tests and strict Clippy. A standalone NPU-buffer
 diagnostic initially failed native teardown. Selecting the device before
 importing Mooncake fixed it: two real-device round trips verified both 4 MiB
 directions and exited normally. Restoring the old import order reproduced
-both worker aborts. This is a diagnostic-entry fix; integrated engine/model
-correctness and TTFT remain unmeasured. See the companion archive for the
-exact environment and limitations.
+both worker aborts. This is a diagnostic-entry fix.
+
+A separate real Qwen3-8B BF16 test completed two turns with all 512 output IDs
+matching OFF. Native reverse READ and P-side metrics agree and include a
+generated-token KV page. The target is two 910B4-1 devices, TP1, eager execution,
+16 GiB KV per endpoint, with P prefix caching disabled. This proves targeted
+model reuse. Separate warmed AB/BA/AB validation completed all three pairs,
+with fresh engines and the same immutable image, model/package hashes and
+equal warmup across all six arms. Each pair passed the unchanged per-length
+gain gate, exact input/output-ID checks and physical reverse-READ accounting.
+The measured workload was serial with P prefix caching disabled to simulate
+eviction; general task accuracy and production goodput were not evaluated.
+See the companion archive for the exact environment and limitations.
+
+Separate correctness checks enabled P prefix caching in a fresh deployment.
+One case read only a missing complete generated-token KV page; another
+forwarded a candidate but required no reverse READ because the prefix was
+already local. Both matched their ordinary-Prefill output-ID references, with
+no failed SDK transfers. Their timings are excluded from the eviction result.
 
 ## Client contract and prefix correctness
 
@@ -109,9 +136,9 @@ their exact tool/thinking history.
 | --- | ---: | --- |
 | `max_entries` | 1024 | Maximum tracked conversations, including active turns |
 | `max_bytes` | 16777216 | Maximum retained transfer-metadata bytes |
-| `max_entry_bytes` | 1048576 | Per-entry metadata and response-observation byte bound |
+| `max_entry_bytes` | 1048576 | Per-entry metadata and observation byte bound |
 | `max_tokens` | 65536 | Per-turn token-proof bound |
-| `ttl_secs` | 450 | Conservative local lifetime, shorter than the configured engine TTL |
+| `ttl_secs` | 450 | Local lifetime, shorter than the engine TTL |
 
 The cache is scoped by credential, tenant header, model, endpoint and
 conversation. It retains hashes and block metadata rather than prompt text.
@@ -149,7 +176,8 @@ metrics to prove the latter.
 ```bash
 cargo test --locked --lib bidirectional_kv
 cargo test --locked --test bidirectional_kv_routing
-cargo clippy --locked --lib --bin vllm-router --test bidirectional_kv_routing -- -D warnings
+cargo clippy --locked --lib --bin vllm-router \
+  --test bidirectional_kv_routing -- -D warnings
 cargo fmt --all -- --check
 ```
 
@@ -175,7 +203,7 @@ It reused installed tools and dependency caches; it was not a clean image build.
 | Total selected Rust tests | 780 passed, zero failed/ignored |
 | Clippy | all targets, all features, `-D warnings` passed |
 | Format | passed |
-| Integrated engine KV/model correctness and TTFT gain | not measured |
+| Model correctness and TTFT | NPU validation above; CUDA/NIXL unmeasured |
 
 Separate real Rust-binary/TCP-mock probes observed no D metadata on the second
 P request in the earlier delivered binary, and the expected D metadata in the
@@ -228,5 +256,6 @@ model hashes, exact source/package revisions, image tag/digest, hardware,
 launch logs, raw requests, P metrics, failures and timing intervals. This is a
 prefix-eviction workload; also evaluate P prefix caching enabled for a normal
 operating baseline. It is not a production-goodput or complete-Agent benchmark.
-No real-device bidirectional speedup is claimed by these software tests or by
-the unexecuted example commands.
+These software tests and example commands alone do not establish a real-device
+speedup. The separate completed Ascend acceptance described above uses the
+Mooncake launcher and patched core companion, rather than this CUDA template.
