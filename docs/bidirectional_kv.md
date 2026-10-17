@@ -42,7 +42,7 @@ NIXL is not a validated substitute for CUDA device-buffer NIXL.
 ### Ascend NPU path on v0.30.0rc2
 
 Use `--kv-connector mooncake-pull` with the companion
-[Ascend adaptation](https://github.com/Liuchenbing-2026/vllm-ascend/tree/dda01353a89c8f1ab1b5b2a9322ec1f7be76f7b1),
+[Ascend adaptation](https://github.com/Liuchenbing-2026/vllm-ascend/tree/627b96175bb5d4d64d915282084773f00752191c),
 based on Ascend `v0.30.0rc2` (`8fde6d4e335fe300e2b949aab0e31659cce0811d`).
 The rc2 Dockerfile pairs it with core vLLM `v0.30.0`; record the actual image
 digest and installed versions during validation.
