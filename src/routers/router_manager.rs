@@ -5,7 +5,9 @@
 //! - Multi-Router Mode (enable_igw=true): RouterManager coordinates everything
 
 use crate::config::RouterConfig;
-use crate::core::{CircuitBreakerConfig, Worker, WorkerFactory, WorkerRegistry, WorkerType};
+use crate::core::{
+    CircuitBreakerConfig, DPAwareWorker, Worker, WorkerFactory, WorkerRegistry, WorkerType,
+};
 use crate::protocols::spec::{
     ChatCompletionRequest, CompletionRequest, EmbeddingRequest, GenerateRequest,
     InferenceGenerateRequest, RerankRequest, ResponsesRequest,
@@ -61,6 +63,9 @@ pub struct RouterManager {
     /// Configuration
     #[allow(dead_code)] // May be used in future enhancements
     config: RouterConfig,
+
+    /// Serialize membership checks and updates, including duplicate rank POSTs.
+    membership_lock: std::sync::Mutex<()>,
 }
 
 impl RouterManager {
@@ -78,6 +83,7 @@ impl RouterManager {
             default_router: Arc::new(std::sync::RwLock::new(None)),
             client,
             config,
+            membership_lock: std::sync::Mutex::new(()),
         }
     }
 
@@ -154,6 +160,40 @@ impl RouterManager {
         &self,
         config: WorkerConfigRequest,
     ) -> Result<WorkerApiResponse, WorkerErrorResponse> {
+        // Validate before querying the worker or changing any registry state.
+        let dp = match (config.dp_rank, config.dp_size) {
+            (None, None) => None,
+            (Some(rank), Some(size)) if size > 0 && rank < size => {
+                let url = reqwest::Url::parse(&config.url).map_err(|_| WorkerErrorResponse {
+                    error: "DP registration requires an HTTP(S) base URL".into(),
+                    code: "INVALID_DP_CONFIG".into(),
+                })?;
+                if !matches!(url.scheme(), "http" | "https")
+                    || url.host_str().is_none()
+                    || !url.username().is_empty()
+                    || url.password().is_some()
+                    || url.query().is_some()
+                    || url.fragment().is_some()
+                    || url.as_str().contains('@')
+                    || !matches!(
+                        config.worker_type.as_deref(),
+                        None | Some("regular" | "prefill" | "decode")
+                    )
+                {
+                    return Err(WorkerErrorResponse {
+                        error: "DP registration requires an HTTP(S) base URL without credentials, query, fragment or @rank, and a regular/prefill/decode role".into(),
+                        code: "INVALID_DP_CONFIG".into(),
+                    });
+                }
+                Some((url.as_str().trim_end_matches('/').to_string(), rank, size))
+            }
+            _ => {
+                return Err(WorkerErrorResponse {
+                    error: "Supply both dp_rank and dp_size with 0 <= dp_rank < dp_size".into(),
+                    code: "INVALID_DP_CONFIG".into(),
+                })
+            }
+        };
         // Build labels from configuration
         let mut labels = config.labels.clone();
 
@@ -190,24 +230,73 @@ impl RouterManager {
             labels.insert("cost".to_string(), cost.to_string());
         }
 
-        let worker = match config.worker_type.as_deref() {
-            Some("prefill") => WorkerFactory::create_prefill_with_labels(
-                config.url.clone(),
-                config.bootstrap_port,
-                labels.clone(),
-                CircuitBreakerConfig::default(),
-            ),
-            Some("decode") => WorkerFactory::create_decode_with_labels(
-                config.url.clone(),
-                labels.clone(),
-                CircuitBreakerConfig::default(),
-            ),
-            _ => WorkerFactory::create_regular_with_labels(
-                config.url.clone(),
-                labels.clone(),
-                CircuitBreakerConfig::default(),
-            ),
+        let worker: Box<dyn Worker> = if let Some((base_url, rank, size)) = dp {
+            let worker_type = match config.worker_type.as_deref() {
+                Some("prefill") => WorkerType::Prefill {
+                    bootstrap_port: config.bootstrap_port,
+                },
+                Some("decode") => WorkerType::Decode,
+                _ => WorkerType::Regular,
+            };
+            Box::new(
+                DPAwareWorker::new(base_url, rank, size, worker_type)
+                    .with_labels(labels.clone())
+                    .with_circuit_breaker_config(CircuitBreakerConfig::default()),
+            )
+        } else {
+            match config.worker_type.as_deref() {
+                Some("prefill") => WorkerFactory::create_prefill_with_labels(
+                    config.url.clone(),
+                    config.bootstrap_port,
+                    labels.clone(),
+                    CircuitBreakerConfig::default(),
+                ),
+                Some("decode") => WorkerFactory::create_decode_with_labels(
+                    config.url.clone(),
+                    labels.clone(),
+                    CircuitBreakerConfig::default(),
+                ),
+                _ => WorkerFactory::create_regular_with_labels(
+                    config.url.clone(),
+                    labels.clone(),
+                    CircuitBreakerConfig::default(),
+                ),
+            }
         };
+
+        // No await under this lock. Reposting a DP target must preserve its
+        // live counters, policy count and index entries instead of replacing it.
+        let _membership = self.membership_lock.lock().unwrap();
+        for (id, existing) in self.worker_registry.get_all_with_ids() {
+            if existing.base_url().trim_end_matches('/') != worker.base_url().trim_end_matches('/')
+                || !(existing.is_dp_aware() || worker.is_dp_aware())
+            {
+                continue;
+            }
+            if existing.is_dp_aware() != worker.is_dp_aware()
+                || existing.dp_size() != worker.dp_size()
+                || existing.worker_type() != worker.worker_type()
+                || existing.model_id() != worker.model_id()
+            {
+                return Err(WorkerErrorResponse {
+                    error: "Endpoint already has incompatible worker topology; remove it before changing DP size, role or model".into(),
+                    code: "WORKER_TOPOLOGY_CONFLICT".into(),
+                });
+            }
+            if existing.url() == worker.url() {
+                if existing.metadata().labels != worker.metadata().labels {
+                    return Err(WorkerErrorResponse {
+                        error: "Rank already registered with different labels; remove it before updating".into(),
+                        code: "WORKER_TOPOLOGY_CONFLICT".into(),
+                    });
+                }
+                return Ok(WorkerApiResponse {
+                    success: true,
+                    message: format!("Worker {} already registered", existing.url()),
+                    worker: Some(self.worker_to_info(id.as_str(), &existing)),
+                });
+            }
+        }
 
         // Register worker
         let worker_arc: Arc<dyn Worker> = Arc::from(worker);
@@ -252,6 +341,26 @@ impl RouterManager {
         &self,
         url: &str,
     ) -> Result<WorkerApiResponse, WorkerErrorResponse> {
+        let _membership = self.membership_lock.lock().unwrap();
+        // A logical URL removes one rank; a base URL removes its DP cohort.
+        let ranks: Vec<_> = self
+            .worker_registry
+            .get_all()
+            .into_iter()
+            .filter(|worker| worker.is_dp_aware() && worker.base_url() == url.trim_end_matches('/'))
+            .collect();
+        if !ranks.is_empty() {
+            for worker in ranks {
+                if self.worker_registry.remove_by_url(worker.url()).is_some() {
+                    self.policy_registry.on_worker_removed(worker.model_id());
+                }
+            }
+            return Ok(WorkerApiResponse {
+                success: true,
+                message: format!("DP workers at endpoint {url} removed successfully"),
+                worker: None,
+            });
+        }
         // Get worker to extract model_id before removing
         let model_id = self
             .worker_registry
@@ -347,6 +456,9 @@ impl RouterManager {
         WorkerInfo {
             id: id.to_string(),
             url: worker.url().to_string(),
+            base_url: worker.is_dp_aware().then(|| worker.base_url().to_string()),
+            dp_rank: worker.dp_rank(),
+            dp_size: worker.dp_size(),
             model_id: worker.model_id().to_string(),
             priority: worker.priority(),
             cost: worker.cost(),
@@ -459,6 +571,8 @@ impl WorkerManagement for RouterManager {
             cost: None,
             labels: std::collections::HashMap::new(),
             bootstrap_port: None,
+            dp_rank: None,
+            dp_size: None,
         };
 
         match self.add_worker(config).await {

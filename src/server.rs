@@ -586,6 +586,16 @@ async fn create_worker(
         }
     } else {
         // In single router mode, use the router's add_worker with basic config
+        if config.dp_rank.is_some() || config.dp_size.is_some() {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(WorkerErrorResponse {
+                    error: "Explicit DP registration requires --enable-igw".into(),
+                    code: "DP_REGISTRATION_REQUIRES_IGW".into(),
+                }),
+            )
+                .into_response();
+        }
         match state.router.add_worker(&config.url).await {
             Ok(message) => {
                 let response = WorkerApiResponse {

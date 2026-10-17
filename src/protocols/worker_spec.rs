@@ -31,6 +31,14 @@ pub struct WorkerConfigRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bootstrap_port: Option<u16>,
 
+    /// Explicit addressable DP rank. Supply together with dp_size in IGW mode.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dp_rank: Option<usize>,
+
+    /// DP size of this endpoint, independent of other prefill/decode endpoints.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dp_size: Option<usize>,
+
     /// Additional labels (optional)
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub labels: HashMap<String, String>,
@@ -44,6 +52,16 @@ pub struct WorkerInfo {
 
     /// Worker URL
     pub url: String,
+
+    /// Network endpoint without the logical @rank suffix (DP workers only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dp_rank: Option<usize>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dp_size: Option<usize>,
 
     /// Model ID this worker serves
     pub model_id: String,

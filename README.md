@@ -153,6 +153,62 @@ cargo run --release -- \
 
 ## Configuration
 
+### Explicit DP-rank registration in IGW mode
+
+With `--enable-igw`, `POST /workers` accepts an optional pair of `dp_rank` and
+`dp_size`. Each POST registers **one addressable rank**, rather than expanding
+all ranks or changing the worker's internal load balancer. Register every rank
+that the router should select. Each endpoint can have its own DP size.
+
+```bash
+curl http://localhost:30000/workers -H 'Content-Type: application/json' -d '{
+  "url": "http://prefill:8000", "model_id": "example-model",
+  "worker_type": "prefill", "dp_rank": 3, "dp_size": 4
+}'
+curl http://localhost:30000/workers -H 'Content-Type: application/json' -d '{
+  "url": "http://decode:8000", "model_id": "example-model",
+  "worker_type": "decode", "dp_rank": 1, "dp_size": 2
+}'
+curl http://localhost:30000/workers
+```
+
+The response exposes `url` (logical identity, e.g. `http://prefill:8000@3`),
+`base_url` (network endpoint), `dp_rank`, and `dp_size`. Inference uses the
+network endpoint and the selected rank's `X-data-parallel-rank` header. The
+backend must support and honor that header; registration does not discover or
+prove the backend's actual topology. The global DP-size flag does not override
+these explicit endpoint-local values.
+
+Both fields are required together, with `dp_size > 0` and `dp_rank < dp_size`.
+Explicit registration supports HTTP(S) regular/prefill/decode workers; the base
+URL must not contain credentials, a query, a fragment, or an `@rank` suffix.
+DP fields outside IGW mode are rejected rather than ignored. Without either
+field, the existing basic-worker API and response shape are preserved.
+
+Identical DP registrations are idempotent, including concurrent POSTs: the
+worker ID, load counters and registry membership are retained. A conflicting
+size, model, role or existing rank's labels is rejected. Remove the endpoint
+before changing its topology; basic and explicit-DP registrations cannot share
+the same endpoint. This API does not update a running worker's configuration.
+
+Use the URL-encoded logical identity to remove one rank; use the encoded base
+URL to remove every registered DP rank at that endpoint:
+
+```bash
+curl -X DELETE 'http://localhost:30000/workers/http%3A%2F%2Fprefill%3A8000%403'
+curl -X DELETE 'http://localhost:30000/workers/http%3A%2F%2Fprefill%3A8000'
+```
+
+Removal prevents future selection and cleans policy membership. It does not
+cancel in-flight requests or implement a drain protocol. Register/discover an
+endpoint through one lifecycle owner; concurrent updates from an independent
+service-discovery controller are not coordinated by this IGW API.
+
+Run the CPU protocol regressions with `cargo test --locked --test
+igw_dp_registration`. The tests use local HTTP workers, including rank-header
+forwarding; they do not validate device execution, actual KV reuse or hardware
+performance.
+
 ### Authentication
 
 Enable bearer-token validation by listing validation URLs (comma-separated) in `.env` via `API_KEY_VALIDATION_URLS` or passing `--api-key-validation-urls`.

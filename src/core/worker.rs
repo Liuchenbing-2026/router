@@ -528,6 +528,12 @@ impl DPAwareWorker {
         self.base_worker = self.base_worker.with_health_config(config);
         self
     }
+
+    /// Preserve model and policy labels when registering an explicit DP rank.
+    pub fn with_labels(mut self, labels: std::collections::HashMap<String, String>) -> Self {
+        self.base_worker = self.base_worker.with_labels(labels);
+        self
+    }
 }
 
 #[async_trait]

@@ -46,6 +46,8 @@ async fn test_policy_registry_with_router_manager() {
         cost: None,
         labels: labels1,
         bootstrap_port: None,
+        dp_rank: None,
+        dp_size: None,
     };
 
     // This would normally connect to a real worker, but for testing we'll just verify the structure
@@ -67,6 +69,8 @@ async fn test_policy_registry_with_router_manager() {
         cost: None,
         labels: labels2,
         bootstrap_port: None,
+        dp_rank: None,
+        dp_size: None,
     };
 
     // The second worker should use the same policy as the first (cache_aware)
@@ -83,6 +87,8 @@ async fn test_policy_registry_with_router_manager() {
         cost: None,
         labels: labels3,
         bootstrap_port: None,
+        dp_rank: None,
+        dp_size: None,
     };
 
     // Verify gpt-4 has random policy
