@@ -1,8 +1,9 @@
 //! Factory for creating load balancing policies
 
 use super::{
-    CacheAwareConfig, CacheAwarePolicy, ConsistentHashPolicy, LoadBalancingPolicy,
-    PowerOfTwoPolicy, RandomPolicy, RendezvousHashPolicy, RoundRobinPolicy,
+    CacheAwareConfig, CacheAwarePolicy, ConsistentHashPolicy, CostParams, KvAwarePolicy,
+    LoadBalancingPolicy, PowerOfTwoPolicy, RandomPolicy, RendezvousHashPolicy, RoundRobinPolicy,
+    TransferCredits,
 };
 use crate::config::PolicyConfig;
 use std::sync::Arc;
@@ -36,6 +37,21 @@ impl PolicyFactory {
                 };
                 Arc::new(CacheAwarePolicy::with_config(config))
             }
+            PolicyConfig::KvAware {
+                router_temperature,
+                kv_penalty_host,
+                kv_penalty_external,
+                kv_penalty_disk,
+            } => Arc::new(KvAwarePolicy::new(CostParams {
+                router_temperature: *router_temperature,
+                transfer_credits: TransferCredits {
+                    device: 1.0,
+                    host_pinned: *kv_penalty_host,
+                    external: *kv_penalty_external,
+                    disk: *kv_penalty_disk,
+                },
+                ..CostParams::default()
+            })),
             PolicyConfig::ConsistentHash { virtual_nodes: _ } => {
                 // Note: virtual_nodes parameter is available but not currently used
                 // The consistent hash policy uses a hardcoded value for now
@@ -53,6 +69,7 @@ impl PolicyFactory {
             "round_robin" | "roundrobin" => Some(Arc::new(RoundRobinPolicy::new())),
             "power_of_two" | "poweroftwo" => Some(Arc::new(PowerOfTwoPolicy::new())),
             "cache_aware" | "cacheaware" => Some(Arc::new(CacheAwarePolicy::new())),
+            "kv_aware" | "kvaware" => Some(Arc::new(KvAwarePolicy::default())),
             "consistent_hash" | "consistenthash" => Some(Arc::new(ConsistentHashPolicy::new())),
             "rendezvous_hash" | "rendezvoushash" => Some(Arc::new(RendezvousHashPolicy::new())),
             _ => None,
@@ -63,6 +80,44 @@ impl PolicyFactory {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_kv_policy_modes_keep_distinct_capabilities() {
+        for (name, trusted) in [("kv_aware", false), ("trusted_kv_aware", true)] {
+            let config: PolicyConfig =
+                serde_json::from_value(serde_json::json!({"type": name})).unwrap();
+            assert_eq!(config.name(), name);
+            let policy = PolicyFactory::create_from_config(&config);
+            assert_eq!(policy.name(), name);
+            assert_eq!(
+                policy.as_any().is::<super::super::TrustedKvAwarePolicy>(),
+                trusted
+            );
+            assert_eq!(
+                super::super::kv_aware_ops(policy.as_ref()).is_some(),
+                !trusted
+            );
+            assert_eq!(PolicyFactory::create_by_name(name).unwrap().name(), name);
+        }
+    }
+
+    #[test]
+    fn test_trusted_limits_do_not_replace_upstream_cost_parameters() {
+        let policy: PolicyConfig = serde_json::from_value(serde_json::json!({
+            "type": "kv_aware", "router_temperature": 0.25, "kv_penalty_host": 0.6
+        }))
+        .unwrap();
+        assert!(matches!(policy, PolicyConfig::KvAware {
+            router_temperature, kv_penalty_host, ..
+        } if router_temperature == 0.25 && kv_penalty_host == 0.6));
+
+        let policy: PolicyConfig = serde_json::from_value(serde_json::json!({
+            "type": "trusted_kv_aware", "cache_weight": 0.75, "max_sources": 32
+        }))
+        .unwrap();
+        assert!(matches!(policy, PolicyConfig::TrustedKvAware { config }
+            if config.cache_weight == 0.75 && config.max_sources == 32));
+    }
 
     #[test]
     fn test_create_from_config() {
@@ -90,6 +145,14 @@ mod tests {
         });
         assert_eq!(policy.name(), "cache_aware");
 
+        let policy = PolicyFactory::create_from_config(&PolicyConfig::KvAware {
+            router_temperature: 0.0,
+            kv_penalty_host: 0.8,
+            kv_penalty_external: 0.6,
+            kv_penalty_disk: 0.3,
+        });
+        assert_eq!(policy.name(), "kv_aware");
+
         // Test ConsistentHash
         let policy =
             PolicyFactory::create_from_config(&PolicyConfig::ConsistentHash { virtual_nodes: 160 });
@@ -110,6 +173,7 @@ mod tests {
         assert!(PolicyFactory::create_by_name("PowerOfTwo").is_some());
         assert!(PolicyFactory::create_by_name("cache_aware").is_some());
         assert!(PolicyFactory::create_by_name("CacheAware").is_some());
+        assert!(PolicyFactory::create_by_name("kv_aware").is_some());
         assert!(PolicyFactory::create_by_name("consistent_hash").is_some());
         assert!(PolicyFactory::create_by_name("ConsistentHash").is_some());
         assert!(PolicyFactory::create_by_name("rendezvous_hash").is_some());

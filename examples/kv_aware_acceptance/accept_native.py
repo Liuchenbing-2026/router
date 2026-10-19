@@ -355,7 +355,10 @@ def main():
         order = list(range(args.contexts))
         random.Random(20261015).shuffle(order)
         for round_index in range(args.rounds):
-            arms = [("round_robin", args.baseline_router), ("trusted_kv_aware", args.kv_router)]
+            arms = [
+                ("round_robin", args.baseline_router),
+                ("trusted_kv_aware", args.kv_router),
+            ]
             if round_index % 2:
                 arms.reverse()
             for policy, base in arms:

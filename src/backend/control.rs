@@ -10,7 +10,8 @@ use tonic::transport::Channel;
 
 use super::detect::grpc_connect_uri;
 use super::pb::{
-    control_client::ControlClient, GetModelInfoRequest, GetServerInfoRequest, ModelInfo, ServerInfo,
+    control_client::ControlClient, GetKvEventSourcesRequest, GetKvEventSourcesResponse,
+    GetModelInfoRequest, GetServerInfoRequest, ModelInfo, ServerInfo,
 };
 
 async fn control_client(
@@ -54,15 +55,16 @@ pub async fn get_grpc_server_info(
 pub async fn get_grpc_kv_event_sources(
     worker_url: &str,
     timeout: Duration,
-) -> Result<super::pb::GetKvEventSourcesResponse, String> {
+) -> Result<GetKvEventSourcesResponse, String> {
+    let uri = grpc_connect_uri(worker_url)?;
     let mut client = control_client(worker_url, timeout).await?;
     tokio::time::timeout(
         timeout,
-        client.get_kv_event_sources(super::pb::GetKvEventSourcesRequest {}),
+        client.get_kv_event_sources(GetKvEventSourcesRequest {}),
     )
     .await
-    .map_err(|_| "gRPC KV source discovery timeout".to_string())?
-    .map_err(|e| e.to_string())
+    .map_err(|_| format!("grpc GetKvEventSources timeout {uri}"))?
+    .map_err(|e| format!("grpc GetKvEventSources {uri}: {e}"))
     .map(|response| response.into_inner())
 }
 

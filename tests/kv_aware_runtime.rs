@@ -12,13 +12,13 @@ use axum::{
 };
 use serde_json::{json, Value};
 use vllm_router_rs::{
-    config::{ConfigValidator, TrustedKvAwareConfig, PolicyConfig, RouterConfig, RoutingMode},
+    config::{ConfigValidator, PolicyConfig, RouterConfig, RoutingMode, TrustedKvAwareConfig},
     core::{BasicWorker, Worker, WorkerType},
     kv_index::{
         routing::KvRoutingMode, wire::ExternalBlockHash, AllBlocksCleared, BlockRemoved,
         BlockStored, KVEvent,
     },
-    policies::{TrustedKvAwarePolicy, PolicyFactory},
+    policies::{PolicyFactory, TrustedKvAwarePolicy},
     protocols::spec::CompletionRequest,
     routers::http::router::Router,
     server::AppContext,
@@ -356,7 +356,10 @@ async fn real_http_forwarding_selects_dp_rank_and_replaces_client_rank_header() 
     p0.subscribed().await;
     p1.subscribed().await;
     let policy = ctx.policy_registry.get_default_policy();
-    let kv = policy.as_any().downcast_ref::<TrustedKvAwarePolicy>().unwrap();
+    let kv = policy
+        .as_any()
+        .downcast_ref::<TrustedKvAwarePolicy>()
+        .unwrap();
     let workers = ctx.worker_registry.get_all();
     p0.send(0, 1, vec![clear()]);
     p1.send(1, 1, vec![clear(), stored()]);
@@ -389,7 +392,10 @@ async fn http_text_and_salted_prompts_fall_back_without_claiming_exact() {
     let (router, ctx) = router(&[&engine], 1).await;
     publisher.subscribed().await;
     let policy = ctx.policy_registry.get_default_policy();
-    let kv = policy.as_any().downcast_ref::<TrustedKvAwarePolicy>().unwrap();
+    let kv = policy
+        .as_any()
+        .downcast_ref::<TrustedKvAwarePolicy>()
+        .unwrap();
     publisher.send(0, 1, vec![clear(), stored()]);
     wait_for(kv, &ctx.worker_registry.get_all(), KvRoutingMode::Exact).await;
     let response = router
@@ -615,7 +621,10 @@ async fn dynamic_add_and_remove_drive_subscription_lifecycle() {
     p0.send(0, 1, vec![clear()]);
     p1.send(0, 1, vec![clear(), stored()]);
     let policy = ctx.policy_registry.get_default_policy();
-    let kv = policy.as_any().downcast_ref::<TrustedKvAwarePolicy>().unwrap();
+    let kv = policy
+        .as_any()
+        .downcast_ref::<TrustedKvAwarePolicy>()
+        .unwrap();
     wait_for(kv, &ctx.worker_registry.get_all(), KvRoutingMode::Exact).await;
     let response = router
         .route_typed_request(
@@ -926,7 +935,10 @@ async fn grpc_control_discovery_and_prepared_tokens_select_the_holding_rank_on_t
     p0.send(0, 1, vec![clear()]);
     p1.send(1, 1, vec![clear(), stored()]);
     let policy = ctx.policy_registry.get_default_policy();
-    let kv = policy.as_any().downcast_ref::<TrustedKvAwarePolicy>().unwrap();
+    let kv = policy
+        .as_any()
+        .downcast_ref::<TrustedKvAwarePolicy>()
+        .unwrap();
     wait_for(kv, &ctx.worker_registry.get_all(), KvRoutingMode::Exact).await;
     let request: vllm_router_rs::protocols::spec::ChatCompletionRequest = serde_json::from_value(
         json!({"model":"m","messages":[{"role":"user","content":"hello"}],"max_tokens":1}),

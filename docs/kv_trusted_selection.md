@@ -2,8 +2,51 @@
 
 `trusted_kv_aware` is an opt-in policy for regular, co-located, normal-dense group-0
 attention with worker-owned Device KV. It combines verified prefix overlap
-with router-local active request load. The existing `cache_aware` policy keeps
-its behavior.
+with router-local active request load. The existing `cache_aware` and
+upstream `kv_aware` policies keep their behavior.
+
+## Policy names after the main integration
+
+| Policy | Configuration | Placement and load contract |
+| --- | --- | --- |
+| `kv_aware` | `router_temperature` and per-tier transfer credits | The main branch cost-based policy, target registrations and request slots |
+| `trusted_kv_aware` | `kv_cache_weight`, freshness and source/block limits | This runtime's completeness barriers, source fencing and verified Device-prefix heuristic |
+
+The old branch called this runtime `kv_aware`. Use `trusted_kv_aware` when
+updating that branch's service commands or serialized policy configuration.
+The main policy's name and settings are not aliases for this runtime. Both
+modes are regular-routing policies; neither can be selected for P/D stages.
+The trusted mode also rejects a disaggregated configuration when both stage
+policies override its main-policy setting, matching its Rust validator.
+
+Both modes use the main branch's cancellation-safe `RequestLoadGuard`.
+The trusted mode accounts worker load once and does not create an upstream
+`KvRequestSlot` or a second load guard. Upstream discovery and the main
+`kv_aware` implementation are retained.
+
+Historical acceptance data in `results-20261015.json` remains unchanged and
+belongs to its original revision and old policy name. It is not a measurement
+of this integration candidate. Local CLI validation of this update does not
+replace Rust compilation, the runtime tests or real-engine acceptance.
+
+## Scoped regression after the main integration
+
+The integration base is `ba9fc05b2692c829700f97e250eb3194bb9be002`.
+Use the following CPU regressions to check policy/configuration separation,
+stream/cancellation cleanup, selected HTTP rank and prepared-token gRPC routing:
+
+```bash
+cargo +1.95.0 test --locked --lib policies::factory::tests::test_kv_policy_modes_keep_distinct_capabilities -- --exact
+cargo +1.95.0 test --locked --lib policies::factory::tests::test_trusted_limits_do_not_replace_upstream_cost_parameters -- --exact
+cargo +1.95.0 test --locked --test kv_aware_runtime stream_drop_and_cancellation_before_headers_release_exactly_one_load_slot -- --exact
+cargo +1.95.0 test --locked --test kv_aware_runtime real_http_forwarding_selects_dp_rank_and_replaces_client_rank_header -- --exact
+cargo +1.95.0 test --locked --test kv_aware_runtime grpc_control_discovery_and_prepared_tokens_select_the_holding_rank_on_the_wire -- --exact
+```
+
+These commands define the scoped regression; their execution receipt must be
+bound to the tested commit. The historical results below are not results of
+this main integration. This conflict update also does not close the separate
+cross-source reconciliation review.
 
 ## Running the policy
 
