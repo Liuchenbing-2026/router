@@ -18,7 +18,7 @@ use super::{
     KvBlockIndexer, KvEventSourcesResponse, MatchQuery, ResidencyOwner, RoutableTarget,
     StorageTier,
 };
-use crate::config::types::KvAwareConfig;
+use crate::config::types::TrustedKvAwareConfig;
 use crate::core::Worker;
 
 struct Cursor {
@@ -62,7 +62,7 @@ struct State {
 }
 
 pub struct KvRuntime {
-    config: KvAwareConfig,
+    config: TrustedKvAwareConfig,
     state: Mutex<State>,
     context: Arc<zmq::Context>,
 }
@@ -76,7 +76,7 @@ impl std::fmt::Debug for KvRuntime {
 }
 
 impl KvRuntime {
-    pub fn new(config: KvAwareConfig) -> Self {
+    pub fn new(config: TrustedKvAwareConfig) -> Self {
         Self {
             config,
             state: Mutex::new(State::default()),

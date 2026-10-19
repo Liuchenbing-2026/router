@@ -355,7 +355,7 @@ def main():
         order = list(range(args.contexts))
         random.Random(20261015).shuffle(order)
         for round_index in range(args.rounds):
-            arms = [("round_robin", args.baseline_router), ("kv_aware", args.kv_router)]
+            arms = [("round_robin", args.baseline_router), ("trusted_kv_aware", args.kv_router)]
             if round_index % 2:
                 arms.reverse()
             for policy, base in arms:
@@ -401,7 +401,7 @@ def main():
                     round=round_index,
                     policy=policy,
                 )
-                if policy == "kv_aware":
+                if policy == "trusted_kv_aware":
                     check(
                         "all_measured_kv_requests_exact",
                         all(output["mode"] == "exact" for output in outputs),
@@ -417,7 +417,7 @@ def main():
                     ),
                     flush=True,
                 )
-        for policy in ("round_robin", "kv_aware"):
+        for policy in ("round_robin", "trusted_kv_aware"):
             arms = [arm for arm in result["arms"] if arm["policy"] == policy]
             if not arms:
                 continue

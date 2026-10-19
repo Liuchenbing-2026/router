@@ -12,13 +12,13 @@ use axum::{
 };
 use serde_json::{json, Value};
 use vllm_router_rs::{
-    config::{ConfigValidator, KvAwareConfig, PolicyConfig, RouterConfig, RoutingMode},
+    config::{ConfigValidator, TrustedKvAwareConfig, PolicyConfig, RouterConfig, RoutingMode},
     core::{BasicWorker, Worker, WorkerType},
     kv_index::{
         routing::KvRoutingMode, wire::ExternalBlockHash, AllBlocksCleared, BlockRemoved,
         BlockStored, KVEvent,
     },
-    policies::{KvAwarePolicy, PolicyFactory},
+    policies::{TrustedKvAwarePolicy, PolicyFactory},
     protocols::spec::CompletionRequest,
     routers::http::router::Router,
     server::AppContext,
@@ -182,14 +182,14 @@ async fn complete(
     }
     Json(json!({"worker":state.info["instance_id"],"rank":headers.get("x-data-parallel-rank").and_then(|h|h.to_str().ok()),"prompt":body["prompt"]})).into_response()
 }
-fn policy() -> KvAwarePolicy {
-    KvAwarePolicy::with_config(KvAwareConfig {
+fn policy() -> TrustedKvAwarePolicy {
+    TrustedKvAwarePolicy::with_config(TrustedKvAwareConfig {
         cache_weight: 0.9,
         ..Default::default()
     })
 }
 async fn wait_for(
-    policy: &KvAwarePolicy,
+    policy: &TrustedKvAwarePolicy,
     workers: &[Arc<dyn Worker>],
     expected: KvRoutingMode,
 ) -> (usize, vllm_router_rs::kv_index::routing::KvRoutingDecision) {
@@ -209,7 +209,7 @@ async fn wait_for(
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
 }
-async fn attach(policy: &KvAwarePolicy, engine: &Engine, publishers: &[&Publisher]) {
+async fn attach(policy: &TrustedKvAwarePolicy, engine: &Engine, publishers: &[&Publisher]) {
     policy
         .runtime
         .discover(&reqwest::Client::new(), &engine.url, None)
@@ -225,8 +225,8 @@ async fn router(engines: &[&Engine], dp_size: usize) -> (Arc<Router>, Arc<AppCon
         mode: RoutingMode::Regular {
             worker_urls: urls.clone(),
         },
-        policy: PolicyConfig::KvAware {
-            config: KvAwareConfig {
+        policy: PolicyConfig::TrustedKvAware {
+            config: TrustedKvAwareConfig {
                 cache_weight: 0.9,
                 ..Default::default()
             },
@@ -321,7 +321,7 @@ async fn gaps_corruption_wrong_rank_and_old_timestamps_need_a_new_clear_barrier(
 async fn freshness_duplicates_budget_and_removal_do_not_preserve_exact_credit() {
     let publisher = Publisher::new();
     let engine = Engine::new("w", &[(0, &publisher)]).await;
-    let policy = KvAwarePolicy::with_config(KvAwareConfig {
+    let policy = TrustedKvAwarePolicy::with_config(TrustedKvAwareConfig {
         max_event_age_secs: 1,
         max_blocks: 2,
         ..Default::default()
@@ -356,7 +356,7 @@ async fn real_http_forwarding_selects_dp_rank_and_replaces_client_rank_header() 
     p0.subscribed().await;
     p1.subscribed().await;
     let policy = ctx.policy_registry.get_default_policy();
-    let kv = policy.as_any().downcast_ref::<KvAwarePolicy>().unwrap();
+    let kv = policy.as_any().downcast_ref::<TrustedKvAwarePolicy>().unwrap();
     let workers = ctx.worker_registry.get_all();
     p0.send(0, 1, vec![clear()]);
     p1.send(1, 1, vec![clear(), stored()]);
@@ -389,7 +389,7 @@ async fn http_text_and_salted_prompts_fall_back_without_claiming_exact() {
     let (router, ctx) = router(&[&engine], 1).await;
     publisher.subscribed().await;
     let policy = ctx.policy_registry.get_default_policy();
-    let kv = policy.as_any().downcast_ref::<KvAwarePolicy>().unwrap();
+    let kv = policy.as_any().downcast_ref::<TrustedKvAwarePolicy>().unwrap();
     publisher.send(0, 1, vec![clear(), stored()]);
     wait_for(kv, &ctx.worker_registry.get_all(), KvRoutingMode::Exact).await;
     let response = router
@@ -470,32 +470,32 @@ async fn stream_drop_and_cancellation_before_headers_release_exactly_one_load_sl
 
 #[test]
 fn config_is_registered_and_invalid_limits_and_disaggregated_modes_are_rejected() {
-    let policy: PolicyConfig = serde_json::from_value(json!({"type":"kv_aware"})).unwrap();
+    let policy: PolicyConfig = serde_json::from_value(json!({"type":"trusted_kv_aware"})).unwrap();
     assert_eq!(
         PolicyFactory::create_from_config(&policy).name(),
-        "kv_aware"
+        "trusted_kv_aware"
     );
-    assert!(PolicyFactory::create_by_name("kv_aware").is_some());
+    assert!(PolicyFactory::create_by_name("trusted_kv_aware").is_some());
     for config in [
-        KvAwareConfig {
+        TrustedKvAwareConfig {
             cache_weight: f64::NAN,
             ..Default::default()
         },
-        KvAwareConfig {
+        TrustedKvAwareConfig {
             max_sources: 0,
             ..Default::default()
         },
-        KvAwareConfig {
+        TrustedKvAwareConfig {
             max_event_age_secs: 0,
             ..Default::default()
         },
-        KvAwareConfig {
+        TrustedKvAwareConfig {
             max_blocks: 0,
             ..Default::default()
         },
     ] {
         let config = RouterConfig {
-            policy: PolicyConfig::KvAware { config },
+            policy: PolicyConfig::TrustedKvAware { config },
             mode: RoutingMode::Regular {
                 worker_urls: vec!["http://worker:8000".into()],
             },
@@ -615,7 +615,7 @@ async fn dynamic_add_and_remove_drive_subscription_lifecycle() {
     p0.send(0, 1, vec![clear()]);
     p1.send(0, 1, vec![clear(), stored()]);
     let policy = ctx.policy_registry.get_default_policy();
-    let kv = policy.as_any().downcast_ref::<KvAwarePolicy>().unwrap();
+    let kv = policy.as_any().downcast_ref::<TrustedKvAwarePolicy>().unwrap();
     wait_for(kv, &ctx.worker_registry.get_all(), KvRoutingMode::Exact).await;
     let response = router
         .route_typed_request(
@@ -674,7 +674,7 @@ async fn duplicate_publisher_mapping_and_source_capacity_are_rejected_without_cr
     let p0 = Publisher::new();
     let p1 = Publisher::new();
     let two = Engine::new("two", &[(0, &p0), (1, &p1)]).await;
-    let limited = KvAwarePolicy::with_config(KvAwareConfig {
+    let limited = TrustedKvAwarePolicy::with_config(TrustedKvAwareConfig {
         max_sources: 1,
         ..Default::default()
     });
@@ -905,8 +905,8 @@ async fn grpc_control_discovery_and_prepared_tokens_select_the_holding_rank_on_t
         mode: RoutingMode::Regular {
             worker_urls: vec![url.clone()],
         },
-        policy: PolicyConfig::KvAware {
-            config: KvAwareConfig {
+        policy: PolicyConfig::TrustedKvAware {
+            config: TrustedKvAwareConfig {
                 cache_weight: 0.9,
                 ..Default::default()
             },
@@ -926,7 +926,7 @@ async fn grpc_control_discovery_and_prepared_tokens_select_the_holding_rank_on_t
     p0.send(0, 1, vec![clear()]);
     p1.send(1, 1, vec![clear(), stored()]);
     let policy = ctx.policy_registry.get_default_policy();
-    let kv = policy.as_any().downcast_ref::<KvAwarePolicy>().unwrap();
+    let kv = policy.as_any().downcast_ref::<TrustedKvAwarePolicy>().unwrap();
     wait_for(kv, &ctx.worker_registry.get_all(), KvRoutingMode::Exact).await;
     let request: vllm_router_rs::protocols::spec::ChatCompletionRequest = serde_json::from_value(
         json!({"model":"m","messages":[{"role":"user","content":"hello"}],"max_tokens":1}),

@@ -377,7 +377,7 @@ impl Router {
 
         if let Some(kv) = default_policy
             .as_any()
-            .downcast_ref::<crate::policies::KvAwarePolicy>()
+            .downcast_ref::<crate::policies::TrustedKvAwarePolicy>()
         {
             let mut bases = std::collections::HashSet::new();
             for worker in ctx.worker_registry.get_all() {
@@ -1143,11 +1143,11 @@ impl Router {
         };
         let kv_policy = routing_policy
             .as_any()
-            .downcast_ref::<crate::policies::KvAwarePolicy>();
+            .downcast_ref::<crate::policies::TrustedKvAwarePolicy>();
         let kv_body = kv_policy.and_then(|_| serde_json::to_value(typed_req).ok());
         let kv_namespace_safe = kv_body
             .as_ref()
-            .is_some_and(crate::policies::kv_aware::namespace_safe);
+            .is_some_and(crate::policies::trusted_kv_aware::namespace_safe);
         let completion_tokens: Option<Vec<u32>> = if route == "/v1/completions" {
             kv_body
                 .as_ref()
@@ -1988,7 +1988,7 @@ impl Router {
                     let policy = self.policy_registry.get_default_policy();
                     if let Some(kv) = policy
                         .as_any()
-                        .downcast_ref::<crate::policies::KvAwarePolicy>()
+                        .downcast_ref::<crate::policies::TrustedKvAwarePolicy>()
                     {
                         if let Err(error) = kv
                             .runtime
@@ -2024,7 +2024,7 @@ impl Router {
         let policy = self.policy_registry.get_default_policy();
         if let Some(kv) = policy
             .as_any()
-            .downcast_ref::<crate::policies::KvAwarePolicy>()
+            .downcast_ref::<crate::policies::TrustedKvAwarePolicy>()
         {
             kv.runtime.remove_worker(worker_url);
         }

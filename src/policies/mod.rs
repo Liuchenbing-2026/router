@@ -12,7 +12,7 @@ mod cache_aware;
 mod consistent_hash;
 mod factory;
 pub(crate) mod hash_key;
-pub(crate) mod kv_aware;
+pub(crate) mod trusted_kv_aware;
 mod power_of_two;
 mod random;
 mod registry;
@@ -23,7 +23,7 @@ pub use cache_aware::{CacheAwareCandidate, CacheAwarePlacement, CacheAwarePolicy
 pub use consistent_hash::ConsistentHashPolicy;
 pub use consistent_hash::VIRTUAL_NODES_PER_WORKER;
 pub use factory::PolicyFactory;
-pub use kv_aware::KvAwarePolicy;
+pub use trusted_kv_aware::TrustedKvAwarePolicy;
 pub use power_of_two::PowerOfTwoPolicy;
 pub use random::RandomPolicy;
 pub use registry::PolicyRegistry;

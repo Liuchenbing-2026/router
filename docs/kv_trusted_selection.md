@@ -1,6 +1,6 @@
 # KV-aware routing and trusted selection
 
-`kv_aware` is an opt-in policy for regular, co-located, normal-dense group-0
+`trusted_kv_aware` is an opt-in policy for regular, co-located, normal-dense group-0
 attention with worker-owned Device KV. It combines verified prefix overlap
 with router-local active request load. The existing `cache_aware` policy keeps
 its behavior.
@@ -13,13 +13,13 @@ Build the current branch and select the policy explicitly:
 cargo build --locked --bin vllm-router
 ./target/debug/vllm-router --host 127.0.0.1 --port 3001 \
   --worker-urls grpc://127.0.0.1:50051 \
-  --policy kv_aware --kv-cache-weight 0.5 \
+  --policy trusted_kv_aware --kv-cache-weight 0.5 \
   --kv-max-event-age-secs 30 --kv-max-sources 1024 --kv-max-blocks 65536
 ```
 
 These are example service commands; the CPU verification below does not start
 a real inference engine. Rebuild the Rust extension before selecting
-`PolicyType.KvAware` through the Python API or `--policy kv_aware` through the
+`PolicyType.TrustedKvAware` through the Python API or `--policy trusted_kv_aware` through the
 Python launcher. The Python entry uses the same default limits.
 
 For gRPC workers, discovery uses Control.GetServerInfo, GetModelInfo and
@@ -226,7 +226,7 @@ cargo +1.95.0 build --locked --bin vllm-router \
 /work/runs/20261015-kv-agent/target-isolated/debug/vllm-router \
   --host 127.0.0.1 --port 28640 \
   --worker-urls http://127.0.0.1:28610 http://127.0.0.1:28611 \
-  --policy kv_aware --prometheus-port 28650 --log-level debug \
+  --policy trusted_kv_aware --prometheus-port 28650 --log-level debug \
   --retry-max-retries 1 --kv-max-event-age-secs 300 \
   --enable-program-scheduling \
   --program-scheduling-config-json '{"program_scheduling_enable_key":"auto","binding_only":true}'

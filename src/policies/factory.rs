@@ -14,8 +14,8 @@ impl PolicyFactory {
     /// Create a policy from configuration
     pub fn create_from_config(config: &PolicyConfig) -> Arc<dyn LoadBalancingPolicy> {
         match config {
-            PolicyConfig::KvAware { config } => {
-                Arc::new(super::KvAwarePolicy::with_config(config.clone()))
+            PolicyConfig::TrustedKvAware { config } => {
+                Arc::new(super::TrustedKvAwarePolicy::with_config(config.clone()))
             }
             PolicyConfig::Random => Arc::new(RandomPolicy::new()),
             PolicyConfig::RoundRobin => Arc::new(RoundRobinPolicy::new()),
@@ -48,7 +48,7 @@ impl PolicyFactory {
     /// Create a policy by name (for dynamic loading)
     pub fn create_by_name(name: &str) -> Option<Arc<dyn LoadBalancingPolicy>> {
         match name.to_lowercase().as_str() {
-            "kv_aware" => Some(Arc::new(super::KvAwarePolicy::default())),
+            "trusted_kv_aware" => Some(Arc::new(super::TrustedKvAwarePolicy::default())),
             "random" => Some(Arc::new(RandomPolicy::new())),
             "round_robin" | "roundrobin" => Some(Arc::new(RoundRobinPolicy::new())),
             "power_of_two" | "poweroftwo" => Some(Arc::new(PowerOfTwoPolicy::new())),

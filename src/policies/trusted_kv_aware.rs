@@ -1,23 +1,23 @@
 //! Opt-in policy backed by fenced, engine-owned KV event state.
 use super::{LoadBalancingPolicy, RequestHeaders};
-use crate::config::types::KvAwareConfig;
+use crate::config::types::TrustedKvAwareConfig;
 use crate::core::Worker;
 use crate::kv_index::routing::KvRoutingDecision;
 use crate::kv_index::runtime::KvRuntime;
 use std::sync::Arc;
 
 #[derive(Debug)]
-pub struct KvAwarePolicy {
+pub struct TrustedKvAwarePolicy {
     pub runtime: Arc<KvRuntime>,
 }
 
-impl Default for KvAwarePolicy {
+impl Default for TrustedKvAwarePolicy {
     fn default() -> Self {
-        Self::with_config(KvAwareConfig::default())
+        Self::with_config(TrustedKvAwareConfig::default())
     }
 }
-impl KvAwarePolicy {
-    pub fn with_config(config: KvAwareConfig) -> Self {
+impl TrustedKvAwarePolicy {
+    pub fn with_config(config: TrustedKvAwareConfig) -> Self {
         Self {
             runtime: Arc::new(KvRuntime::new(config)),
         }
@@ -32,7 +32,7 @@ impl KvAwarePolicy {
         self.runtime.select(workers, model, tokens, namespace_safe)
     }
 }
-impl LoadBalancingPolicy for KvAwarePolicy {
+impl LoadBalancingPolicy for TrustedKvAwarePolicy {
     fn select_worker_with_headers(
         &self,
         workers: &[Arc<dyn Worker>],
@@ -43,7 +43,7 @@ impl LoadBalancingPolicy for KvAwarePolicy {
             .map(|(idx, _)| idx)
     }
     fn name(&self) -> &'static str {
-        "kv_aware"
+        "trusted_kv_aware"
     }
     fn as_any(&self) -> &dyn std::any::Any {
         self

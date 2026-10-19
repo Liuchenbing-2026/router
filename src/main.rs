@@ -120,7 +120,7 @@ struct CliArgs {
     worker_urls: Vec<String>,
 
     /// Load balancing policy to use
-    #[arg(long, default_value = "cache_aware", value_parser = ["random", "round_robin", "cache_aware", "kv_aware", "power_of_two", "consistent_hash", "rendezvous_hash"])]
+    #[arg(long, default_value = "cache_aware", value_parser = ["random", "round_robin", "cache_aware", "trusted_kv_aware", "power_of_two", "consistent_hash", "rendezvous_hash"])]
     policy: String,
 
     /// Weight of verified cache overlap versus active load (0..1).
@@ -160,11 +160,11 @@ struct CliArgs {
     decode: Vec<String>,
 
     /// Specific policy for prefill nodes in PD mode
-    #[arg(long, value_parser = ["random", "round_robin", "cache_aware", "kv_aware", "power_of_two", "consistent_hash", "rendezvous_hash"])]
+    #[arg(long, value_parser = ["random", "round_robin", "cache_aware", "trusted_kv_aware", "power_of_two", "consistent_hash", "rendezvous_hash"])]
     prefill_policy: Option<String>,
 
     /// Specific policy for decode nodes in PD mode
-    #[arg(long, value_parser = ["random", "round_robin", "cache_aware", "kv_aware", "power_of_two", "consistent_hash", "rendezvous_hash"])]
+    #[arg(long, value_parser = ["random", "round_robin", "cache_aware", "trusted_kv_aware", "power_of_two", "consistent_hash", "rendezvous_hash"])]
     decode_policy: Option<String>,
 
     /// Timeout in seconds for worker startup
@@ -412,8 +412,8 @@ impl CliArgs {
     /// Convert policy string to PolicyConfig
     fn parse_policy(&self, policy_str: &str) -> PolicyConfig {
         match policy_str {
-            "kv_aware" => PolicyConfig::KvAware {
-                config: vllm_router_rs::config::KvAwareConfig {
+            "trusted_kv_aware" => PolicyConfig::TrustedKvAware {
+                config: vllm_router_rs::config::TrustedKvAwareConfig {
                     cache_weight: self.kv_cache_weight,
                     max_event_age_secs: self.kv_max_event_age_secs,
                     max_sources: self.kv_max_sources,
@@ -803,7 +803,7 @@ mod tests {
         let args = CliArgs::try_parse_from([
             "vllm-router",
             "--policy",
-            "kv_aware",
+            "trusted_kv_aware",
             "--kv-cache-weight",
             "0.75",
             "--kv-max-event-age-secs",
@@ -814,8 +814,8 @@ mod tests {
             "2048",
         ])
         .unwrap();
-        let PolicyConfig::KvAware { config } = args.parse_policy(&args.policy) else {
-            panic!("expected kv_aware")
+        let PolicyConfig::TrustedKvAware { config } = args.parse_policy(&args.policy) else {
+            panic!("expected trusted_kv_aware")
         };
         assert_eq!(config.cache_weight, 0.75);
         assert_eq!(config.max_event_age_secs, 12);

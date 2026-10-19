@@ -19,16 +19,16 @@ impl ConfigValidator {
 
         Self::validate_mode(&config.mode, has_service_discovery)?;
         Self::validate_policy(&config.policy)?;
-        let has_kv_policy = matches!(config.policy, PolicyConfig::KvAware { .. })
-            || config.mode.get_prefill_policy(&config.policy).name() == "kv_aware"
-            || config.mode.get_decode_policy(&config.policy).name() == "kv_aware";
+        let has_kv_policy = matches!(config.policy, PolicyConfig::TrustedKvAware { .. })
+            || config.mode.get_prefill_policy(&config.policy).name() == "trusted_kv_aware"
+            || config.mode.get_decode_policy(&config.policy).name() == "trusted_kv_aware";
         if has_kv_policy
             && (!matches!(config.mode, RoutingMode::Regular { .. })
                 || config.enable_igw
                 || config.epd.is_some())
         {
             return Err(ConfigError::ValidationFailed {
-                reason: "kv_aware requires regular co-located routing without IGW or EPD".into(),
+                reason: "trusted_kv_aware requires regular co-located routing without IGW or EPD".into(),
             });
         }
         Self::validate_server_settings(config)?;
@@ -359,7 +359,7 @@ impl ConfigValidator {
     /// Validate policy configuration
     fn validate_policy(policy: &PolicyConfig) -> ConfigResult<()> {
         match policy {
-            PolicyConfig::KvAware { config } => config
+            PolicyConfig::TrustedKvAware { config } => config
                 .validate()
                 .map_err(|reason| ConfigError::ValidationFailed { reason })?,
             PolicyConfig::Random | PolicyConfig::RoundRobin => {
