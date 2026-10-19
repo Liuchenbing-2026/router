@@ -1,0 +1,59 @@
+name: PR383 scoped CPU regression
+on:
+  push:
+    branches: [ci/pr383-merge-validation-20261019]
+permissions:
+  contents: read
+concurrency:
+  group: pr383-scoped-cpu-96057781
+  cancel-in-progress: false
+jobs:
+  regression:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      CARGO_BUILD_JOBS: "2"
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: 96057781b3c75faf00a13f9bb413773a2de37b62
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Install CPU build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libssl-dev protobuf-compiler
+      - uses: Swatinem/rust-cache@v2
+      - name: Bind tested source and actual environment
+        run: |
+          mkdir -p regression-logs
+          git rev-parse HEAD > regression-logs/source.txt
+          test "$(git rev-parse HEAD)" = "96057781b3c75faf00a13f9bb413773a2de37b62"
+          rustc -Vv > regression-logs/rustc.txt
+          cargo -V > regression-logs/cargo.txt
+          python3 -V > regression-logs/python.txt
+          sha256sum Cargo.lock > regression-logs/cargo-lock.txt
+          dpkg-query -W pkg-config libssl-dev protobuf-compiler > regression-logs/packages.txt
+          python3 -c 'import json, os; print(json.dumps({k: os.getenv(k) for k in ("RUNNER_OS", "RUNNER_ARCH", "ImageOS", "ImageVersion")}))' > regression-logs/runner.json
+      - name: Policy capability separation
+        run: cargo test --locked --lib policies::factory::tests::test_kv_policy_modes_keep_distinct_capabilities -- --exact 2>&1 | tee regression-logs/policy-capabilities.log
+      - name: Policy configuration separation
+        run: cargo test --locked --lib policies::factory::tests::test_trusted_limits_do_not_replace_upstream_cost_parameters -- --exact 2>&1 | tee regression-logs/policy-config.log
+      - name: Stream drop and cancellation cleanup
+        run: cargo test --locked --test kv_aware_runtime stream_drop_and_cancellation_before_headers_release_exactly_one_load_slot -- --exact 2>&1 | tee regression-logs/stream-cancel.log
+      - name: HTTP selected rank and header ownership
+        run: cargo test --locked --test kv_aware_runtime real_http_forwarding_selects_dp_rank_and_replaces_client_rank_header -- --exact 2>&1 | tee regression-logs/http-rank.log
+      - name: gRPC discovery and prepared-token placement
+        run: cargo test --locked --test kv_aware_runtime grpc_control_discovery_and_prepared_tokens_select_the_holding_rank_on_the_wire -- --exact 2>&1 | tee regression-logs/grpc-rank.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pr383-scoped-cpu-96057781
+          path: regression-logs
+          retention-days: 7
