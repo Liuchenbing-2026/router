@@ -40,7 +40,9 @@ class RouterArgs:
     wasm_middleware: Optional[str] = None
     wasm_middleware_sha256: Optional[str] = None
     wasm_middleware_routes: List[str] = dataclasses.field(default_factory=list)
-    intra_node_data_parallel_size: int = 1  # Intra-node data parallel size (DP-aware routing automatically enabled when > 1)
+    intra_node_data_parallel_size: int = (
+        1  # Intra-node data parallel size (DP-aware routing automatically enabled when > 1)
+    )
     enable_igw: bool = False  # Enable IGW (Inter-Gateway) mode for multi-model support
     api_key: Optional[str] = None
     log_dir: Optional[str] = None
