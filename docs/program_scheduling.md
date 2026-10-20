@@ -150,11 +150,40 @@ The canonical contract is `vllm_xargs.agentic_context`. Identity semantics match
 
 `request_id`, `priority`, `deadline_seconds`, `expected_output_length`, and `kv_retention_ttl_seconds` are request-scoped. They are retained with exactly one RequestPool entry; dispatch transfers them only to that exact in-flight request, and completion or cancellation drops them. Priority affects resume ordering, deadline overrides the force-resume wait, expected output length replaces the default output allowance in capacity demand, and KV-retention TTL replaces the automatic acting TTL after that request completes.
 
+Duration hints must fit in a `Duration`; values outside that representation are rejected as invalid identity metadata. A valid KV-retention TTL that cannot be added to the current monotonic-clock instant is ignored and the Router falls back to the policy-derived acting TTL. Neither case can panic the request path.
+
 ## Compatibility identity inputs
 
 `auto` uses this strict precedence: canonical context, `agent_hint`, then one known Header schema. Claude Code uses `x-claude-code-session-id`, `x-claude-code-agent-id`, and `x-claude-code-parent-agent-id`; Codex/OpenCode uses `session-id` and `thread-id`; the generic schema uses `x-session-id`. Recognized schemas are not mixed.
 
 For `agent_hint`, `session_id` becomes both Program ID and session ID, `task_id` remains absent, and `blocks_parent` defaults to true. A blocking hint requires `parent_session_id`. Explicit `expected_resume` always overrides the blocking-subagent default.
+
+When `program_scheduling_enable_key` is `auto`, `agent_hint` also accepts
+`agent_role`, `step_id`, and the same request-scoped hints as the canonical
+context: `request_id`, `priority`, `deadline_seconds` (alias `deadline`),
+`expected_output_length` (alias `expected_output_tokens`), and
+`kv_retention_ttl_seconds` (alias `kv_retention_ttl`). They are validated and
+consumed by the existing admission, resume, and completion paths; they are not
+silently ignored. All identity and feature-enable precedence remains unchanged.
+
+```json
+{
+  "agent_hint": {
+    "session_id": "research-task",
+    "blocks_parent": false,
+    "agent_role": "researcher",
+    "step_id": 2,
+    "priority": 5,
+    "deadline_seconds": 30,
+    "expected_output_tokens": 512,
+    "kv_retention_ttl_seconds": 5
+  }
+}
+```
+
+These hints affect Router scheduling. A retention hint does not establish that
+the engine retained or prefetched physical KV blocks; engine acceptance and
+actual reuse require separate validation.
 
 ## Resume ordering and capacity
 

@@ -115,7 +115,7 @@ fn decode_event(event: Value) -> Result<KVEvent, String> {
             ],
             &["block_hashes", "medium"],
         ),
-        "AllBlocksCleared" => (&["type"], &[]),
+        "AllBlocksCleared" => (&["type", "medium", "ownership"], &[]),
         _ => return Err(format!("unsupported KV event type: {kind}")),
     };
     if let Some(key) = keys.iter().filter(|key| !allowed.contains(key)).min() {
@@ -145,10 +145,51 @@ fn decode_event(event: Value) -> Result<KVEvent, String> {
             _ => {}
         }
     }
+    if kind == "AllBlocksCleared" {
+        validate_clear_scope(&event)?;
+    }
     // The Value deserializer turns invalid UTF-8 strings into bytes, including
     // opaque extra-key values and map keys. Reject them before DTO conversion.
     validate_utf8_strings(&event)?;
     rmpv::ext::from_value(event).map_err(|error| format!("invalid KV event: {error}"))
+}
+
+fn validate_clear_scope(event: &Value) -> Result<(), String> {
+    let field = |name: &str| {
+        event
+            .as_map()
+            .and_then(|pairs| {
+                pairs
+                    .iter()
+                    .find(|(key, _)| key.as_str() == Some(name))
+                    .map(|(_, value)| value)
+            })
+            .filter(|value| !value.is_nil())
+    };
+    let medium = field("medium")
+        .map(|value| {
+            value
+                .as_str()
+                .ok_or_else(|| "AllBlocksCleared medium must be a string".to_string())
+        })
+        .transpose()?;
+    let ownership = field("ownership")
+        .map(|value| {
+            value
+                .as_str()
+                .ok_or_else(|| "AllBlocksCleared ownership must be a string".to_string())
+        })
+        .transpose()?;
+    if medium.is_some() && ownership.is_some() {
+        return Err("AllBlocksCleared cannot scope both medium and ownership".into());
+    }
+    if medium.is_some_and(|medium| crate::kv_index::StorageTier::parse_medium(medium).is_none()) {
+        return Err("AllBlocksCleared has an unknown medium".into());
+    }
+    if ownership.is_some_and(str::is_empty) {
+        return Err("AllBlocksCleared ownership cannot be empty".into());
+    }
+    Ok(())
 }
 
 fn validate_utf8_strings(value: &Value) -> Result<(), String> {
@@ -337,13 +378,6 @@ mod tests {
         for (event, expected) in [
             (
                 Value::Map(vec![
-                    ("type".into(), "AllBlocksCleared".into()),
-                    ("medium".into(), "GPU".into()),
-                ]),
-                "unsupported KV event field: medium",
-            ),
-            (
-                Value::Map(vec![
                     ("type".into(), "BlockRemoved".into()),
                     ("medium".into(), "GPU".into()),
                 ]),
@@ -377,6 +411,37 @@ mod tests {
             matches!(&batch.events[0], KVEvent::BlockRemoved(event) if event.medium.as_deref() == Some("CPU"))
         );
         assert!(validate_device_batch(&batch, 2).is_err());
+    }
+
+    #[test]
+    fn all_blocks_cleared_accepts_only_unambiguous_scopes() {
+        for (fields, expected) in [
+            (vec![("medium", "GPU".into())], None),
+            (vec![("medium", "cpu".into())], None),
+            (vec![("ownership", "pool".into())], None),
+            (
+                vec![("medium", "GPU".into()), ("ownership", "pool".into())],
+                Some("AllBlocksCleared cannot scope both medium and ownership"),
+            ),
+            (
+                vec![("medium", "future-medium".into())],
+                Some("AllBlocksCleared has an unknown medium"),
+            ),
+            (
+                vec![("ownership", "".into())],
+                Some("AllBlocksCleared ownership cannot be empty"),
+            ),
+        ] {
+            let mut event = Value::Map(vec![("type".into(), "AllBlocksCleared".into())]);
+            for (key, value) in fields {
+                change(&mut event, key, value);
+            }
+            let decoded = decode_batch(&encode(vec![event], 0.into()));
+            match expected {
+                None => assert!(decoded.is_ok(), "{decoded:?}"),
+                Some(expected) => assert_eq!(decoded.unwrap_err(), expected),
+            }
+        }
     }
 
     #[test]

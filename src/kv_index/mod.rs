@@ -9,6 +9,11 @@ use sha2::{Digest, Sha256};
 pub mod discovery;
 mod endpoints;
 pub mod indexer;
+pub mod pairing;
+pub mod reservation;
+pub mod routing;
+pub mod runtime;
+pub mod snapshot;
 pub mod subscriber;
 pub mod types;
 pub mod wire;
@@ -20,6 +25,18 @@ pub use discovery::{
 };
 pub use endpoints::{parse_endpoint_mapping, resolve_endpoints};
 pub use indexer::{KvBlockIndexer, MatchQuery, TierMatch};
+pub use pairing::{PdKvPairDecision, PdKvPairSelector, PdStageSelection, PdTargetPair};
+pub use reservation::{
+    PdCleanupStatus, PdReleaseReport, PdReservationBackend, PdReservationCoordinator,
+    PdReservationError, PdReservationGuard, PdReservationIntent, PdReservationLease,
+    PdReservationStage,
+};
+pub use snapshot::{
+    PortableBlock, PortableCacheIdentity, PortableHashMode, PortableKvSnapshot, PortablePrefix,
+    PortableResidency, PortableResidencyOwner, PortableSnapshotError, PortableSnapshotFence,
+    PortableSnapshotFenceAuthority, PortableSnapshotImport, PortableSnapshotImportStatus,
+    PortableSourceSnapshot, PortableStorageTier, PORTABLE_SNAPSHOT_FORMAT_VERSION,
+};
 pub use subscriber::local_hashes;
 pub use types::{
     CacheOwnerId, ClearScope, HashMode, Locality, ResidencyOwner, RoutableTarget, SourceId,

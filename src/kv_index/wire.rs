@@ -107,7 +107,23 @@ pub struct BlockRemoved {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct AllBlocksCleared {}
+pub struct AllBlocksCleared {
+    /// Optional compatibility extension. Current vLLM emits the empty object,
+    /// which remains a whole-worker barrier across every owned tier. A present
+    /// medium narrows the barrier to one Worker storage tier.
+    #[serde(default)]
+    pub medium: Option<String>,
+    /// Optional compatibility extension. A present non-empty pool identifies
+    /// one shared CacheOwner domain. It is mutually exclusive with `medium`.
+    #[serde(default)]
+    pub ownership: Option<String>,
+}
+
+impl AllBlocksCleared {
+    pub fn is_whole_worker(&self) -> bool {
+        self.medium.is_none() && self.ownership.is_none()
+    }
+}
 
 /// A batch of events: a positional array `[ts, events, (data_parallel_rank)?]`
 /// (`array_like=True`); `seq` rides in its own ZMQ frame. Derived `Deserialize`
@@ -243,12 +259,32 @@ mod tests {
 
     #[test]
     fn all_blocks_cleared_round_trips() {
-        let ev = KVEvent::AllBlocksCleared(AllBlocksCleared {});
+        let ev = KVEvent::AllBlocksCleared(AllBlocksCleared::default());
         let buf = to_vec(&ev).unwrap();
         assert!(matches!(
             from_slice::<KVEvent>(&buf).unwrap(),
             KVEvent::AllBlocksCleared(_)
         ));
+    }
+
+    #[test]
+    fn scoped_all_blocks_cleared_round_trips() {
+        for clear in [
+            AllBlocksCleared {
+                medium: Some("GPU".into()),
+                ownership: None,
+            },
+            AllBlocksCleared {
+                medium: None,
+                ownership: Some("pool".into()),
+            },
+        ] {
+            let buf = to_vec(&KVEvent::AllBlocksCleared(clear)).unwrap();
+            assert!(matches!(
+                from_slice::<KVEvent>(&buf).unwrap(),
+                KVEvent::AllBlocksCleared(_)
+            ));
+        }
     }
 
     #[test]

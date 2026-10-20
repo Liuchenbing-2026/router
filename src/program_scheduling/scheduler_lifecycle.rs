@@ -96,10 +96,23 @@ impl ProgramScheduler {
                     .fitted_acting_ttl(factors, cache_miss_impact_seconds)
             })
             .unwrap_or_default();
-        let acting_ttl = dispatch
-            .request_hints()
-            .kv_retention_ttl
-            .unwrap_or(policy_acting_ttl);
+        let (acting_ttl, ttl_source) = match dispatch.request_hints().kv_retention_ttl {
+            Some(requested_ttl) if now.checked_add(requested_ttl).is_some() => {
+                (requested_ttl, "request_hint")
+            }
+            Some(requested_ttl) => {
+                debug!(
+                    event = "ttl_hint_out_of_range",
+                    program = %dispatch.redacted_program_id(),
+                    target = %target_id,
+                    requested_ttl_seconds = requested_ttl.as_secs_f64(),
+                    fallback_ttl_seconds = policy_acting_ttl.as_secs_f64(),
+                    "Request KV-retention TTL exceeds the monotonic clock range"
+                );
+                (policy_acting_ttl, "fitted")
+            }
+            None => (policy_acting_ttl, "fitted"),
+        };
         let ttl_window_samples = state
             .rank_factors
             .get(&target_id)
@@ -278,32 +291,26 @@ impl ProgramScheduler {
                 });
             }
             if completion_action == Some(CompletionAction::StartActingTtl) {
-                decision.acting_since = Some(now);
-                decision.ttl_deadline = Some(now + acting_ttl);
-                RouterMetrics::record_agent_aware_armed_ttl(
-                    &target_id,
-                    if dispatch.request_hints().kv_retention_ttl.is_some() {
-                        "request_hint"
-                    } else {
-                        "fitted"
-                    },
-                    acting_ttl,
-                );
-                debug!(
-                    event = "ttl_armed",
-                    program = %dispatch.redacted_program_id(),
-                    target = %target_id,
-                    prompt_tokens = observed_prompt_tokens,
-                    cached_prompt_tokens,
-                    uncached_prompt_tokens,
-                    shared_prefix_tokens_for_cost = shared_prefix_for_cost,
-                    estimated_cache_miss_tokens,
-                    request_cache_miss_impact_seconds = cache_miss_impact_seconds,
-                    request_ttl_seconds = acting_ttl.as_secs_f64(),
-                    ttl_window_samples,
-                    ttl_window_complete,
-                    "Program scheduling diagnostic"
-                );
+                if let Some(ttl_deadline) = now.checked_add(acting_ttl) {
+                    decision.acting_since = Some(now);
+                    decision.ttl_deadline = Some(ttl_deadline);
+                    RouterMetrics::record_agent_aware_armed_ttl(&target_id, ttl_source, acting_ttl);
+                    debug!(
+                        event = "ttl_armed",
+                        program = %dispatch.redacted_program_id(),
+                        target = %target_id,
+                        prompt_tokens = observed_prompt_tokens,
+                        cached_prompt_tokens,
+                        uncached_prompt_tokens,
+                        shared_prefix_tokens_for_cost = shared_prefix_for_cost,
+                        estimated_cache_miss_tokens,
+                        request_cache_miss_impact_seconds = cache_miss_impact_seconds,
+                        request_ttl_seconds = acting_ttl.as_secs_f64(),
+                        ttl_window_samples,
+                        ttl_window_complete,
+                        "Program scheduling diagnostic"
+                    );
+                }
             }
             decision.output_token_reservation = None;
         }
@@ -737,6 +744,39 @@ mod tests {
         let state = scheduler.state.lock();
         let deadline = state.decisions[dispatch.program()].ttl_deadline.unwrap();
         assert!(deadline.saturating_duration_since(Instant::now()) > Duration::from_secs(6));
+    }
+
+    #[tokio::test]
+    async fn oversized_request_retention_ttl_falls_back_without_panicking() {
+        let scheduler = ProgramScheduler::new(ProgramSchedulerConfig::default());
+        let target = ProgramTarget {
+            id: "rank-0".into(),
+            base_url: "http://rank-0".into(),
+            dp_rank: Some(0),
+        };
+        let request = json!({"vllm_xargs":{"agentic_context":{
+            "program_id":"ttl-out-of-range",
+            "task_id":null,
+            "expected_resume":true,
+            "kv_retention_ttl_seconds":1e19
+        }}});
+        let identity = ProgramIdentity::from_request(None, Some(&request), Some("model"))
+            .unwrap()
+            .unwrap();
+        let dispatch = scheduler
+            .acquire(identity, 100, &[target], None)
+            .await
+            .unwrap();
+
+        scheduler.complete(&dispatch, true, false, Some(100), Some(0.1));
+
+        let state = scheduler.state.lock();
+        let decision = &state.decisions[dispatch.program()];
+        assert_eq!(decision.ttl_deadline, None);
+        assert_eq!(
+            decision.last_pause_reason,
+            Some(ProgramPauseReason::TtlExpired)
+        );
     }
 
     #[tokio::test]

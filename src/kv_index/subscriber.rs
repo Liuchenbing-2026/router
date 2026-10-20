@@ -3,7 +3,6 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use rmp_serde::from_slice;
 use tokio::sync::{broadcast, mpsc};
 use tracing::{debug, info, warn};
 
@@ -251,7 +250,7 @@ fn read_seq(bytes: &[u8]) -> i64 {
 }
 
 fn decode(payload: &[u8]) -> Option<KVEventBatch> {
-    match from_slice::<KVEventBatch>(payload) {
+    match crate::kv_index::decode_batch(payload) {
         Ok(b) => Some(b),
         Err(e) => {
             warn!("kv_index decode batch: {}", e);
@@ -341,8 +340,32 @@ fn apply_batch(
                 let hashes: Vec<Arc<str>> = r.block_hashes.iter().map(hash_str).collect();
                 indexer.remove(group, &owner, tier, &hashes);
             }
-            KVEvent::AllBlocksCleared(_) => {
-                indexer.clear(&owner_for(source_id, rank, incarnation), ClearScope::Worker);
+            KVEvent::AllBlocksCleared(clear) => {
+                if let Some(pool) = clear.ownership.as_deref().filter(|pool| !pool.is_empty()) {
+                    indexer.clear(
+                        &ResidencyOwner::CacheOwner {
+                            pool_id: Arc::from(pool),
+                            source: source_id.clone(),
+                            dp_rank: rank,
+                        },
+                        ClearScope::CacheOwner,
+                    );
+                } else if let Some(medium) = clear.medium.as_deref() {
+                    let Some(tier) = StorageTier::parse_medium(medium) else {
+                        warn!(
+                            "kv_index {}: ignoring clear with unknown medium {}",
+                            source_id, medium
+                        );
+                        continue;
+                    };
+                    indexer.clear_tier(
+                        &owner_for(source_id, rank, incarnation),
+                        ClearScope::Worker,
+                        tier,
+                    );
+                } else {
+                    indexer.clear(&owner_for(source_id, rank, incarnation), ClearScope::Worker);
+                }
             }
         }
     }
@@ -549,6 +572,137 @@ mod tests {
     }
 
     #[test]
+    fn device_clear_keeps_worker_host_and_shared_pool_copies() {
+        let idx = Arc::new(KvBlockIndexer::new());
+        let source = SourceId::from("w0");
+        let tokens = vec![1, 2, 3, 4];
+        let locals: Vec<Arc<str>> = local_hashes(&tokens, 4, None)
+            .iter()
+            .map(|b| Arc::from(hex(b)))
+            .collect();
+        let query = |tier| MatchQuery {
+            group_idx: 0,
+            local_hashes: locals.clone(),
+            tiers_of_interest: vec![tier],
+        };
+        apply_batch(
+            &idx,
+            &source,
+            0,
+            7,
+            &KVEventBatch {
+                ts: 1.0,
+                events: vec![
+                    KVEvent::BlockStored(stored(
+                        vec![ExternalBlockHash::Int(10)],
+                        tokens.clone(),
+                        Some("GPU"),
+                        None,
+                    )),
+                    KVEvent::BlockStored(stored(
+                        vec![ExternalBlockHash::Int(10)],
+                        tokens.clone(),
+                        Some("CPU"),
+                        None,
+                    )),
+                    KVEvent::BlockStored(stored(
+                        vec![ExternalBlockHash::Int(10)],
+                        tokens,
+                        Some("GPU"),
+                        Some("mooncake"),
+                    )),
+                ],
+                data_parallel_rank: Some(0),
+            },
+        );
+        assert_eq!(idx.find_matches(&query(StorageTier::Device)).len(), 1);
+        assert_eq!(idx.find_matches(&query(StorageTier::HostPinned)).len(), 1);
+        assert_eq!(idx.find_matches(&query(StorageTier::External)).len(), 1);
+
+        apply_batch(
+            &idx,
+            &source,
+            0,
+            7,
+            &KVEventBatch {
+                ts: 2.0,
+                events: vec![KVEvent::AllBlocksCleared(AllBlocksCleared {
+                    medium: Some("GPU".into()),
+                    ownership: None,
+                })],
+                data_parallel_rank: Some(0),
+            },
+        );
+        assert!(idx.find_matches(&query(StorageTier::Device)).is_empty());
+        assert_eq!(idx.find_matches(&query(StorageTier::HostPinned)).len(), 1);
+        assert_eq!(idx.find_matches(&query(StorageTier::External)).len(), 1);
+    }
+
+    #[test]
+    fn shared_pool_clear_keeps_device_and_scopes_the_owner() {
+        let idx = Arc::new(KvBlockIndexer::new());
+        let source = SourceId::from("w0");
+        let tokens = vec![1, 2, 3, 4];
+        let locals: Vec<Arc<str>> = local_hashes(&tokens, 4, None)
+            .iter()
+            .map(|b| Arc::from(hex(b)))
+            .collect();
+        let query = |tier| MatchQuery {
+            group_idx: 0,
+            local_hashes: locals.clone(),
+            tiers_of_interest: vec![tier],
+        };
+        apply_batch(
+            &idx,
+            &source,
+            0,
+            7,
+            &KVEventBatch {
+                ts: 1.0,
+                events: vec![
+                    KVEvent::BlockStored(stored(
+                        vec![ExternalBlockHash::Int(10)],
+                        tokens.clone(),
+                        Some("GPU"),
+                        None,
+                    )),
+                    KVEvent::BlockStored(stored(
+                        vec![ExternalBlockHash::Int(10)],
+                        tokens.clone(),
+                        Some("GPU"),
+                        Some("mooncake"),
+                    )),
+                    KVEvent::BlockStored(stored(
+                        vec![ExternalBlockHash::Int(11)],
+                        tokens,
+                        Some("GPU"),
+                        Some("other-pool"),
+                    )),
+                ],
+                data_parallel_rank: Some(0),
+            },
+        );
+        apply_batch(
+            &idx,
+            &source,
+            0,
+            7,
+            &KVEventBatch {
+                ts: 2.0,
+                events: vec![KVEvent::AllBlocksCleared(AllBlocksCleared {
+                    medium: None,
+                    ownership: Some("mooncake".into()),
+                })],
+                data_parallel_rank: Some(0),
+            },
+        );
+        assert_eq!(idx.find_matches(&query(StorageTier::Device)).len(), 1);
+        let external = idx.find_matches(&query(StorageTier::External));
+        assert_eq!(external.len(), 1);
+        assert_eq!(external[0].segments, vec![(0, 1)]);
+    }
+
+    #[test]
     fn read_seq_big_endian_signed() {
         assert_eq!(read_seq(&(-1i64).to_be_bytes()), -1);
         assert_eq!(read_seq(&42i64.to_be_bytes()), 42);
@@ -731,7 +885,7 @@ mod tests {
             b"kv",
             3,
             3.0,
-            &[KVEvent::AllBlocksCleared(AllBlocksCleared {})],
+            &[KVEvent::AllBlocksCleared(AllBlocksCleared::default())],
             Some(0),
         )
         .await;
@@ -749,7 +903,7 @@ mod tests {
         events: &[KVEvent],
         rank: Option<u32>,
     ) {
-        let payload = rmp_serde::to_vec(&(ts, events, &rank)).unwrap();
+        let payload = rmp_serde::to_vec_named(&(ts, events, &rank)).unwrap();
         let seq_bytes = seq.to_be_bytes();
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
         loop {
@@ -930,7 +1084,7 @@ mod tests {
     }
 
     fn batch_payload(events: &[KVEvent], rank: u32) -> Vec<u8> {
-        rmp_serde::to_vec(&(1.0, events, Some(rank))).unwrap()
+        rmp_serde::to_vec_named(&(1.0, events, Some(rank))).unwrap()
     }
 
     async fn serve_replay(

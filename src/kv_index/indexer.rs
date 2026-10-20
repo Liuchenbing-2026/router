@@ -310,9 +310,23 @@ impl GroupShard {
     /// `CacheOwner`: the scope filters by domain, then the owner is matched
     /// within its domain (Worker by source+dp_rank, CacheOwner by pool_id).
     pub fn clear(&self, owner: &ResidencyOwner, scope: ClearScope) {
+        self.clear_scoped(owner, scope, None);
+    }
+
+    /// Clear only one storage tier for `owner`. This is the index-side
+    /// contract for a tier-scoped clear barrier: dropping a Device claim never
+    /// erases a surviving Host or shared-pool copy of the same block.
+    pub fn clear_tier(&self, owner: &ResidencyOwner, scope: ClearScope, tier: StorageTier) {
+        self.clear_scoped(owner, scope, Some(tier));
+    }
+
+    fn clear_scoped(&self, owner: &ResidencyOwner, scope: ClearScope, tier: Option<StorageTier>) {
         let keys: Vec<OwnerTier> = self.reverse.iter().map(|e| e.key().clone()).collect();
         for key in keys {
             if !matches!(scope, ClearScope::All) && scope != key.0.domain() {
+                continue;
+            }
+            if tier.is_some_and(|tier| key.1 != tier) {
                 continue;
             }
             let same = match (owner, &key.0) {
@@ -548,6 +562,14 @@ impl KvBlockIndexer {
         let shards: Vec<Arc<GroupShard>> = self.shards.iter().map(|e| e.value().clone()).collect();
         for s in shards {
             s.clear(owner, scope);
+        }
+    }
+
+    /// Clear one owner's residency at one tier across every group.
+    pub fn clear_tier(&self, owner: &ResidencyOwner, scope: ClearScope, tier: StorageTier) {
+        let shards: Vec<Arc<GroupShard>> = self.shards.iter().map(|e| e.value().clone()).collect();
+        for s in shards {
+            s.clear_tier(owner, scope, tier);
         }
     }
 
@@ -807,6 +829,33 @@ mod tests {
         assert!(node.read().claims[0].is_empty());
         assert_eq!(node.read().edge[0].0.len(), 2);
         assert!(shard.counts.get(&key).is_none());
+    }
+
+    #[test]
+    fn unknown_parent_suffix_is_not_aliased_into_root_across_sources() {
+        let idx = KvBlockIndexer::new();
+        let tiers = [StorageTier::Device];
+        idx.store(
+            0,
+            worker("a"),
+            StorageTier::Device,
+            Some(h("i:unknown-parent")),
+            &[(h("i:y"), h("y"))],
+        );
+        idx.store(
+            0,
+            worker("b"),
+            StorageTier::Device,
+            None,
+            &[(h("i:x"), h("x")), (h("i:y"), h("y"))],
+        );
+
+        let hits = idx.find_matches(&query(&["y"], &tiers));
+        assert!(hits.is_empty());
+
+        idx.clear(&worker("a"), ClearScope::Worker);
+        let hits = idx.find_matches(&query(&["y"], &tiers));
+        assert!(hits.is_empty());
     }
 
     #[test]
@@ -1312,6 +1361,70 @@ mod tests {
         assert!(idx
             .find_matches(&query(&["h0"], &[StorageTier::HostPinned]))
             .is_empty());
+    }
+
+    #[test]
+    fn tier_scoped_clear_keeps_host_and_shared_lower_tier_copies() {
+        let idx = KvBlockIndexer::new();
+        idx.store(
+            0,
+            worker("w0"),
+            StorageTier::Device,
+            None,
+            &[(h("h0"), h("h0"))],
+        );
+        idx.store(
+            0,
+            worker("w0"),
+            StorageTier::HostPinned,
+            None,
+            &[(h("h0"), h("h0"))],
+        );
+        idx.store(
+            0,
+            pool("mooncake", "w0"),
+            StorageTier::External,
+            None,
+            &[(h("h0"), h("h0"))],
+        );
+        idx.store(
+            1,
+            worker("w0"),
+            StorageTier::Device,
+            None,
+            &[(h("g1"), h("g1"))],
+        );
+        idx.store(
+            1,
+            worker("w0"),
+            StorageTier::HostPinned,
+            None,
+            &[(h("g1"), h("g1"))],
+        );
+
+        idx.clear_tier(&worker("w0"), ClearScope::Worker, StorageTier::Device);
+
+        assert!(idx
+            .find_matches(&query(&["h0"], &[StorageTier::Device]))
+            .is_empty());
+        assert_eq!(
+            idx.find_matches(&query(&["h0"], &[StorageTier::HostPinned]))
+                .len(),
+            1
+        );
+        assert_eq!(
+            idx.find_matches(&query(&["h0"], &[StorageTier::External]))
+                .len(),
+            1
+        );
+        assert!(idx
+            .find_matches(&query_group(1, &["g1"], &[StorageTier::Device]))
+            .is_empty());
+        assert_eq!(
+            idx.find_matches(&query_group(1, &["g1"], &[StorageTier::HostPinned]))
+                .len(),
+            1
+        );
     }
 
     #[test]

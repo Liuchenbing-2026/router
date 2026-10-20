@@ -142,6 +142,26 @@ fn cleared_shape_admits_absent_zero_and_nonzero_rank() {
 }
 
 #[test]
+fn device_admission_accepts_whole_worker_and_device_scoped_clears_only() {
+    let clear = |medium: Option<&str>, ownership: Option<&str>| {
+        let mut fields: Vec<(rmpv::Value, rmpv::Value)> =
+            vec![("type".into(), "AllBlocksCleared".into())];
+        if let Some(medium) = medium {
+            fields.push(("medium".into(), medium.into()));
+        }
+        if let Some(ownership) = ownership {
+            fields.push(("ownership".into(), ownership.into()));
+        }
+        decoded_event(rmpv::Value::Map(fields), Some(0.into()))
+    };
+
+    assert!(validate_device_batch(&clear(None, None), 2).is_ok());
+    assert!(validate_device_batch(&clear(Some("GPU"), None), 2).is_ok());
+    assert!(validate_device_batch(&clear(Some("CPU"), None), 2).is_err());
+    assert!(validate_device_batch(&clear(None, Some("pool")), 2).is_err());
+}
+
+#[test]
 fn same_source_rank_remove_and_clear_are_isolated() {
     let index = KvBlockIndexer::new();
     let configured = ResidencyOwner::Worker {

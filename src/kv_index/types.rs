@@ -97,16 +97,24 @@ pub enum StorageTier {
 }
 
 impl StorageTier {
+    /// Parse an engine medium without the permissive Device fallback used by
+    /// ordinary stored/removed events. Lifecycle clear barriers must reject
+    /// an unknown medium instead of accidentally clearing the Device tier.
+    pub fn parse_medium(value: &str) -> Option<Self> {
+        match value.to_ascii_uppercase().as_str() {
+            "GPU" | "DEVICE" => Some(StorageTier::Device),
+            "CPU" | "HOST" | "HOST_PINNED" => Some(StorageTier::HostPinned),
+            "STORAGE" | "DISK" => Some(StorageTier::Disk),
+            _ => None,
+        }
+    }
+
     /// Map a worker's `medium` field to its tier. vLLM emits uppercase
     /// `GPU`/`CPU`/`STORAGE`; matched case-insensitively. Unknown/None → Device.
     /// `External` is not produced here — it derives from the owner domain.
     pub fn from_medium(s: Option<&str>) -> Self {
-        match s.map(|m| m.to_ascii_uppercase()).as_deref() {
-            None | Some("GPU") | Some("DEVICE") => StorageTier::Device,
-            Some("CPU") | Some("HOST") | Some("HOST_PINNED") => StorageTier::HostPinned,
-            Some("STORAGE") | Some("DISK") => StorageTier::Disk,
-            _ => StorageTier::Device,
-        }
+        s.and_then(Self::parse_medium)
+            .unwrap_or(StorageTier::Device)
     }
 }
 
@@ -185,6 +193,8 @@ mod tests {
             StorageTier::from_medium(Some("nonsense")),
             StorageTier::Device
         );
+        assert_eq!(StorageTier::parse_medium("GPU"), Some(StorageTier::Device));
+        assert_eq!(StorageTier::parse_medium("nonsense"), None);
     }
 
     #[test]

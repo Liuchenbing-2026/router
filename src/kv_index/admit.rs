@@ -16,7 +16,18 @@ pub fn validate_device_batch(
     }
     for event in &batch.events {
         let (hashes, medium, group, locality, ownership) = match event {
-            KVEvent::AllBlocksCleared(_) => continue,
+            KVEvent::AllBlocksCleared(clear) => {
+                // The trusted Device runtime may accept upstream's whole-worker
+                // barrier or an explicit Device tier. Host/shared-pool clears
+                // do not prove anything about the target's Device residency.
+                if clear.medium.as_deref().is_some_and(|medium| {
+                    !matches!(medium.to_ascii_uppercase().as_str(), "GPU" | "DEVICE")
+                }) || clear.ownership.is_some()
+                {
+                    return Err("clear event is outside the trusted Device worker contract".into());
+                }
+                continue;
+            }
             KVEvent::BlockRemoved(event) => (
                 &event.block_hashes,
                 &event.medium,
