@@ -56,6 +56,14 @@ impl KvTrustRegistry {
         true
     }
 
+    /// Whether this incarnation has a complete baseline for publishing deltas.
+    /// Request-time freshness remains a separate selector check.
+    pub(super) fn is_reconciled(&self, target: &RoutableTarget, incarnation: u64) -> bool {
+        self.sources
+            .get(target)
+            .is_some_and(|state| state.incarnation == incarnation && state.verified)
+    }
+
     pub fn remove(&mut self, target: &RoutableTarget) {
         self.sources.remove(target);
     }

@@ -310,11 +310,28 @@ impl KvRuntime {
             pool.trust
                 .register(target.clone(), cursor.incarnation, Instant::now());
         }
+        let now = Instant::now();
+        pool.trust
+            .advance(&target, cursor.incarnation, sequence, now);
+        let residency = owner(&target, cursor.incarnation);
+        let mut reconciled = pool.trust.is_reconciled(&target, cursor.incarnation);
+        if !reconciled {
+            // A gap also revokes previously published claims. Selection's
+            // fallback alone cannot isolate topology in the shared index.
+            pool.index.clear(&residency, ClearScope::Worker);
+        }
+        // Ignore pre-barrier stores for both index publication and its budget:
+        // an incomplete source must not evict a reconciled peer's index.
+        // Preserve event order when clear and stores share a batch.
         let additions: usize = batch
             .events
             .iter()
-            .map(|e| match e {
-                KVEvent::BlockStored(s) => s.block_hashes.len(),
+            .map(|event| match event {
+                KVEvent::AllBlocksCleared(_) => {
+                    reconciled = true;
+                    0
+                }
+                KVEvent::BlockStored(s) if reconciled => s.block_hashes.len(),
                 _ => 0,
             })
             .sum();
@@ -330,10 +347,6 @@ impl KvRuntime {
             state.announced = state.announced.saturating_sub(released);
             return;
         }
-        let now = Instant::now();
-        pool.trust
-            .advance(&target, cursor.incarnation, sequence, now);
-        let residency = owner(&target, cursor.incarnation);
         for event in batch.events {
             match event {
                 KVEvent::AllBlocksCleared(_) => {
@@ -341,7 +354,9 @@ impl KvRuntime {
                     pool.trust
                         .reconcile(&target, cursor.incarnation, sequence, now);
                 }
-                KVEvent::BlockStored(s) => {
+                KVEvent::BlockStored(s)
+                    if pool.trust.is_reconciled(&target, cursor.incarnation) =>
+                {
                     let locals = local_hashes(&s.token_ids, key.block_size, None);
                     let blocks: Vec<_> = s
                         .block_hashes
@@ -357,12 +372,19 @@ impl KvRuntime {
                         &blocks,
                     );
                 }
-                KVEvent::BlockRemoved(r) => pool.index.remove(
-                    0,
-                    &residency,
-                    StorageTier::Device,
-                    &r.block_hashes.iter().map(opaque).collect::<Vec<_>>(),
-                ),
+                KVEvent::BlockRemoved(r)
+                    if pool.trust.is_reconciled(&target, cursor.incarnation) =>
+                {
+                    pool.index.remove(
+                        0,
+                        &residency,
+                        StorageTier::Device,
+                        &r.block_hashes.iter().map(opaque).collect::<Vec<_>>(),
+                    )
+                }
+                // Do not create or rewrite shared aliases before a validated
+                // completeness barrier, including after loss or restart.
+                KVEvent::BlockStored(_) | KVEvent::BlockRemoved(_) => {}
             }
         }
         cursor.sequence = Some(sequence);
@@ -676,5 +698,322 @@ async fn subscribe(
                 return;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod human_review_tests {
+    use super::*;
+    use crate::core::BasicWorker;
+    use serde_json::json;
+
+    fn cache_key() -> CacheKey {
+        CacheKey {
+            model: Arc::from("m"),
+            hash_mode: HashMode::Sha256,
+            block_size: 2,
+        }
+    }
+
+    fn fixture(max_blocks: usize) -> KvRuntime {
+        let runtime = KvRuntime::new(TrustedKvAwareConfig {
+            max_blocks,
+            ..Default::default()
+        });
+        let mut pool = Pool {
+            index: KvBlockIndexer::new(),
+            trust: KvTrustRegistry::new(2).unwrap(),
+            cursors: HashMap::new(),
+            announced: 0,
+        };
+        let mut state = runtime.state.lock();
+        for (name, generation) in [("a", 1), ("b", 2)] {
+            let target = RoutableTarget {
+                instance_id: Arc::from(name),
+                dp_rank: 0,
+            };
+            assert!(pool.trust.register(target.clone(), 0, Instant::now()));
+            pool.cursors.insert(
+                target,
+                Cursor {
+                    sequence: None,
+                    incarnation: 0,
+                },
+            );
+            state.workers.insert(
+                format!("http://{name}"),
+                WorkerSource {
+                    generation,
+                    key: Some(cache_key()),
+                    instance: name.to_string(),
+                    models: vec!["m".into()],
+                    ranks: vec![0],
+                    endpoints: Vec::new(),
+                    tasks: Vec::new(),
+                },
+            );
+        }
+        state.pools.insert(cache_key(), pool);
+        drop(state);
+        runtime
+    }
+
+    fn stored(hashes: &[u64], parent: Option<u64>, tokens: &[u32]) -> KVEvent {
+        let KVEvent::BlockStored(mut event) = serde_json::from_value(json!({"type":"BlockStored", "block_hashes":hashes, "parent_block_hash":parent, "token_ids":tokens, "block_size":2, "lora_id":null, "medium":"GPU", "lora_name":null})).unwrap() else { unreachable!() };
+        // Production admission only accepts 32-byte sha256_cbor hash keys.
+        let hash = |value: u64| {
+            super::super::wire::ExternalBlockHash::Bytes(vec![u8::try_from(value).unwrap(); 32])
+        };
+        event.block_hashes = hashes.iter().map(|value| hash(*value)).collect();
+        event.parent_block_hash = parent.map(hash);
+        KVEvent::BlockStored(event)
+    }
+
+    fn clear() -> KVEvent {
+        KVEvent::AllBlocksCleared(super::super::AllBlocksCleared::default())
+    }
+
+    fn send(runtime: &KvRuntime, name: &str, sequence: u64, events: Vec<KVEvent>) {
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs_f64();
+        let bytes = rmp_serde::to_vec_named(&(ts, events, 0_u32)).unwrap();
+        validate_device_batch(&decode_batch(&bytes).unwrap(), 2)
+            .expect("regression fixture must satisfy production admission");
+        runtime.ingest(
+            &format!("http://{name}"),
+            if name == "a" { 1 } else { 2 },
+            0,
+            sequence,
+            &bytes,
+        );
+    }
+
+    fn held(runtime: &KvRuntime, name: &str, tokens: &[u32]) -> u32 {
+        let query = MatchQuery {
+            group_idx: 0,
+            local_hashes: local_hashes(tokens, 2, None)
+                .iter()
+                .map(|h| hex_key(h))
+                .collect(),
+            tiers_of_interest: vec![StorageTier::Device],
+        };
+        runtime.state.lock().pools[&cache_key()]
+            .index
+            .find_matches(&query)
+            .iter()
+            .filter(|hit| hit.target.instance_id.as_ref() == name)
+            .flat_map(|hit| &hit.segments)
+            .map(|(start, end)| end - start)
+            .sum()
+    }
+
+    fn announced(runtime: &KvRuntime) -> usize {
+        let state = runtime.state.lock();
+        assert_eq!(state.announced, state.pools[&cache_key()].announced);
+        state.announced
+    }
+
+    fn decision(runtime: &KvRuntime, names: &[&str], tokens: &[u32]) -> KvRoutingDecision {
+        let workers: Vec<Arc<dyn Worker>> = names
+            .iter()
+            .map(|name| {
+                Arc::new(BasicWorker::new(
+                    format!("http://{name}"),
+                    crate::core::WorkerType::Regular,
+                )) as Arc<dyn Worker>
+            })
+            .collect();
+        runtime
+            .select(&workers, Some("m"), Some(tokens), true)
+            .unwrap()
+            .1
+    }
+
+    #[test]
+    fn unknown_parent_then_other_source_chain_and_clear_leaves_no_stale_credit() {
+        // The literal review sequence: A attaches mid-cache with Y's parent X
+        // missing, B publishes X -> Y, then A clears. Main's parent guard must
+        // not leave A's suffix Y at the root or disturb B's legitimate chain.
+        let runtime = fixture(16);
+        send(&runtime, "a", 1, vec![stored(&[20], Some(10), &[3, 4])]);
+        send(
+            &runtime,
+            "b",
+            1,
+            vec![clear(), stored(&[10, 20], None, &[1, 2, 3, 4])],
+        );
+        send(&runtime, "a", 2, vec![clear()]);
+        assert_eq!(held(&runtime, "a", &[3, 4]), 0);
+        assert_eq!(held(&runtime, "b", &[1, 2, 3, 4]), 2);
+        let d = decision(&runtime, &["a", "b"], &[3, 4, 5]);
+        assert_eq!(d.mode, KvRoutingMode::Exact);
+        assert!(d.scores.iter().all(|s| s.credited_blocks == 0.0));
+    }
+
+    #[test]
+    fn unreconciled_root_deltas_never_enter_the_shared_index() {
+        let runtime = fixture(16);
+        send(&runtime, "a", 1, vec![stored(&[10], None, &[1, 2])]);
+        assert_eq!(
+            held(&runtime, "a", &[1, 2]),
+            0,
+            "unreconciled source published residency"
+        );
+        assert_eq!(announced(&runtime), 0);
+        send(
+            &runtime,
+            "b",
+            1,
+            vec![clear(), stored(&[10, 20], None, &[1, 2, 3, 4])],
+        );
+        send(&runtime, "a", 2, vec![stored(&[10], None, &[1, 2])]);
+        assert_eq!(held(&runtime, "a", &[1, 2]), 0);
+        assert_eq!(held(&runtime, "b", &[1, 2, 3, 4]), 2);
+        assert_eq!(announced(&runtime), 2);
+        assert_eq!(
+            decision(&runtime, &["a", "b"], &[1, 2, 3, 4, 5]).mode,
+            KvRoutingMode::Fallback
+        );
+        send(&runtime, "a", 3, vec![clear()]);
+        let d = decision(&runtime, &["a", "b"], &[1, 2, 3, 4, 5]);
+        assert_eq!(d.mode, KvRoutingMode::Exact);
+        assert_eq!(d.target.unwrap().instance_id.as_ref(), "b");
+    }
+
+    #[test]
+    fn unreconciled_source_cannot_exhaust_a_healthy_sources_shared_budget() {
+        let runtime = fixture(2);
+        send(
+            &runtime,
+            "b",
+            1,
+            vec![clear(), stored(&[10, 20], None, &[1, 2, 3, 4])],
+        );
+        assert_eq!(held(&runtime, "b", &[1, 2, 3, 4]), 2);
+        send(&runtime, "a", 1, vec![stored(&[30], None, &[7, 8])]);
+        assert_eq!(
+            held(&runtime, "b", &[1, 2, 3, 4]),
+            2,
+            "unreconciled delta wiped another source's verified cache"
+        );
+        assert_eq!(announced(&runtime), 2);
+        assert_eq!(
+            decision(&runtime, &["b"], &[1, 2, 3, 4, 5]).mode,
+            KvRoutingMode::Exact
+        );
+    }
+
+    #[test]
+    fn a_sequence_gap_discards_old_claims_and_quarantines_later_deltas() {
+        let runtime = fixture(16);
+        send(
+            &runtime,
+            "a",
+            1,
+            vec![clear(), stored(&[10], None, &[1, 2])],
+        );
+        send(
+            &runtime,
+            "b",
+            1,
+            vec![clear(), stored(&[10, 20], None, &[1, 2, 3, 4])],
+        );
+        send(&runtime, "a", 3, vec![stored(&[30], None, &[7, 8])]);
+        assert_eq!(
+            held(&runtime, "a", &[1, 2]),
+            0,
+            "gap retained pre-gap claims in the shared index"
+        );
+        assert_eq!(held(&runtime, "a", &[7, 8]), 0);
+        assert_eq!(held(&runtime, "b", &[1, 2, 3, 4]), 2);
+        send(&runtime, "a", 4, vec![stored(&[30], None, &[7, 8])]);
+        assert_eq!(announced(&runtime), 3);
+        send(
+            &runtime,
+            "a",
+            5,
+            vec![clear(), stored(&[30], None, &[7, 8])],
+        );
+        assert_eq!(held(&runtime, "a", &[7, 8]), 1);
+        assert_eq!(announced(&runtime), 4);
+        assert_eq!(
+            decision(&runtime, &["a", "b"], &[1, 2, 3, 4, 5]).mode,
+            KvRoutingMode::Exact
+        );
+    }
+
+    #[test]
+    fn only_stores_after_a_clear_in_the_same_batch_are_published_and_counted() {
+        let runtime = fixture(1);
+        send(
+            &runtime,
+            "a",
+            1,
+            vec![
+                stored(&[10], None, &[1, 2]),
+                clear(),
+                stored(&[30], None, &[7, 8]),
+            ],
+        );
+        assert_eq!(held(&runtime, "a", &[1, 2]), 0);
+        assert_eq!(
+            held(&runtime, "a", &[7, 8]),
+            1,
+            "pre-barrier delta consumed the only admitted block slot"
+        );
+        assert_eq!(announced(&runtime), 1);
+        assert_eq!(
+            decision(&runtime, &["a"], &[7, 8, 9]).mode,
+            KvRoutingMode::Exact
+        );
+    }
+
+    #[test]
+    fn invalidation_and_rollback_require_a_new_clear_before_publication() {
+        let runtime = fixture(16);
+        send(
+            &runtime,
+            "a",
+            1,
+            vec![clear(), stored(&[10], None, &[1, 2])],
+        );
+        send(
+            &runtime,
+            "b",
+            1,
+            vec![clear(), stored(&[10, 20], None, &[1, 2, 3, 4])],
+        );
+        runtime.invalidate("http://a", 1, 0);
+        send(&runtime, "a", 2, vec![stored(&[30], None, &[7, 8])]);
+        assert_eq!(
+            held(&runtime, "a", &[7, 8]),
+            0,
+            "unavailable source republished without a clear"
+        );
+        send(
+            &runtime,
+            "a",
+            3,
+            vec![clear(), stored(&[30], None, &[7, 8])],
+        );
+        assert_eq!(held(&runtime, "a", &[7, 8]), 1);
+        send(&runtime, "a", 1, vec![stored(&[10], None, &[1, 2])]);
+        assert_eq!(
+            held(&runtime, "a", &[1, 2]),
+            0,
+            "new incarnation republished without a clear"
+        );
+        assert_eq!(held(&runtime, "a", &[7, 8]), 0);
+        assert_eq!(held(&runtime, "b", &[1, 2, 3, 4]), 2);
+        send(
+            &runtime,
+            "a",
+            2,
+            vec![clear(), stored(&[40], None, &[9, 10])],
+        );
+        assert_eq!(held(&runtime, "a", &[9, 10]), 1);
+        assert_eq!(announced(&runtime), 5);
     }
 }

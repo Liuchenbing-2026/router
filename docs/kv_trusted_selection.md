@@ -100,6 +100,13 @@ by this runtime. Publisher and router clocks must be synchronized within the
 configured freshness window; timestamps over one second into the future are
 rejected.
 
+Unreconciled sources do not publish stores or removals into the shared index.
+A gap discards that source's existing residency claims, and subsequent deltas
+stay ignored until a valid clear barrier. Ignored stores do not consume the
+shared block-announcement budget or discard another source's verified index.
+Events within one batch retain their order: stores before the clear are ignored;
+stores after it can publish. Ignored events are not buffered for later replay.
+
 Worker metadata binds each source to an engine instance, model, block size and
 addressable DP rank. Duplicate instances/endpoints and duplicate canonical
 ranks are rejected. Removing or replacing a worker revokes its discovery lease
@@ -137,9 +144,10 @@ scores, never prompt text or token IDs. Prometheus counters are
 `router_kv_decisions_total{mode,reason}` and
 `router_kv_ingestion_failures_total{reason}`; reason labels are bounded constants.
 
-Source count is capped globally. `max_blocks` conservatively charges stored
-block announcements, including aliases and duplicates, because retained index
-metadata can outlive residency. Removals do not refund this historical budget.
+Source count is capped globally. `max_blocks` conservatively charges admitted,
+post-reconciliation block announcements, including aliases and duplicates,
+because retained index metadata can outlive residency. Removals do not refund
+this historical budget.
 At exhaustion the affected identity's index is discarded and its sources lose
 trust; new clear barriers are required. The last source's removal releases the
 identity and its budget. This bounds index growth, not the entire process heap
@@ -152,6 +160,22 @@ other engine-owned integrations. That selector can discount storage tiers and
 remote locality; the registered runtime admits only Device events. Callers of
 the library must independently prove complete reconciliation and cache identity.
 Client headers/hints must never establish trust.
+
+## Source-publication regression
+
+```bash
+cargo +1.95.0 test --locked --lib kv_index::runtime::human_review_tests
+cargo +1.95.0 test --locked --test kv_aware_runtime unreconciled_publisher_cannot_erase_a_verified_peers_shared_index -- --exact
+```
+
+The deterministic cases exercise the production MessagePack decoder, shape
+admission, runtime, shared index and selector with valid synthetic events.
+They cover the cross-source unknown-parent/clear sequence, pre-barrier stores,
+shared-budget isolation, sequence gaps, invalidation, rollback and clear/store
+ordering. The transport regression adds real local TCP/ZMQ and HTTP discovery
+with synthetic publishers. It uses A's ordered clear as a processing fence,
+so it cannot pass merely because A's earlier deltas have not been consumed.
+These are CPU protocol checks, not real engine KV or device-performance tests.
 
 ## CPU verification
 

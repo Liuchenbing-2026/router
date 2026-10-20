@@ -960,3 +960,44 @@ async fn grpc_control_discovery_and_prepared_tokens_select_the_holding_rank_on_t
     assert!(ctx.worker_registry.get_all().iter().all(|w| w.load() == 0));
     task.abort();
 }
+
+#[tokio::test]
+async fn unreconciled_publisher_cannot_erase_a_verified_peers_shared_index() {
+    let a = Publisher::new();
+    let b = Publisher::new();
+    let e0 = Engine::new("unreconciled", &[(0, &a)]).await;
+    let e1 = Engine::new("verified", &[(0, &b)]).await;
+    let policy = TrustedKvAwarePolicy::with_config(TrustedKvAwareConfig {
+        max_blocks: 2,
+        ..Default::default()
+    });
+    let workers = vec![e0.worker(), e1.worker()];
+    attach(&policy, &e0, &[&a]).await;
+    attach(&policy, &e1, &[&b]).await;
+    b.send(0, 1, vec![clear(), stored()]);
+    wait_for(&policy, &workers[1..], KvRoutingMode::Exact).await;
+    // A's clear is an ordered fence after its ignored deltas. Waiting for
+    // both sources to become exact cannot pass before A's batch is consumed.
+    a.send(0, 1, vec![stored()]);
+    a.send(0, 2, vec![clear()]);
+    let decision = wait_for(&policy, &workers, KvRoutingMode::Exact).await.1;
+    assert_eq!(decision.target.unwrap().instance_id.as_ref(), "verified");
+    assert_eq!(
+        decision
+            .scores
+            .iter()
+            .find(|s| s.target.instance_id.as_ref() == "verified")
+            .unwrap()
+            .credited_blocks,
+        2.0
+    );
+    assert_eq!(
+        decision
+            .scores
+            .iter()
+            .find(|s| s.target.instance_id.as_ref() == "unreconciled")
+            .unwrap()
+            .credited_blocks,
+        0.0
+    );
+}
