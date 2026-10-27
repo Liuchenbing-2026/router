@@ -1,0 +1,320 @@
+{
+  "source_revision": "74dab4c0e804878a3ce587718a7e9ad12ef1b8c8",
+  "baseline": "Python vLLM compatibility, not deepseek-recipe parity",
+  "source_files": [
+    {
+      "path": "vllm/tokenizers/deepseek_v4_encoding.py",
+      "sha256": "aa407637bd2e58f20a16f781ea0bc519d06f74bed49deadaecb5aa5756d7230e"
+    },
+    {
+      "path": "vllm/tokenizers/deepseek_v41_encoding.py",
+      "sha256": "477f22ac250b43c12bd19bb3c93f934d6637b06410b8cb7ccba0862d1049dee8"
+    }
+  ],
+  "cases": [
+    {
+      "name": "v4/user-reminder/thinking=False",
+      "model_type": "deepseek_v4",
+      "thinking": false,
+      "messages": [
+        {
+          "role": "user",
+          "content": "Hello"
+        },
+        {
+          "role": "latest_reminder",
+          "content": "Be brief"
+        }
+      ],
+      "prompt": "<｜begin▁of▁sentence｜><｜User｜>Hello<｜Assistant｜></think><｜latest_reminder｜>Be brief"
+    },
+    {
+      "name": "v4/developer-reminder/thinking=False",
+      "model_type": "deepseek_v4",
+      "thinking": false,
+      "messages": [
+        {
+          "role": "developer",
+          "content": "rules"
+        },
+        {
+          "role": "latest_reminder",
+          "content": "Be brief"
+        }
+      ],
+      "prompt": "<｜begin▁of▁sentence｜><｜User｜>rules<｜Assistant｜></think><｜latest_reminder｜>Be brief"
+    },
+    {
+      "name": "v4/mid-system-reminder/thinking=False",
+      "model_type": "deepseek_v4",
+      "thinking": false,
+      "messages": [
+        {
+          "role": "user",
+          "content": "Hello"
+        },
+        {
+          "role": "assistant",
+          "content": "Hi"
+        },
+        {
+          "role": "system",
+          "content": "rules"
+        },
+        {
+          "role": "latest_reminder",
+          "content": "Be brief"
+        }
+      ],
+      "prompt": "<｜begin▁of▁sentence｜><｜User｜>Hello<｜Assistant｜></think>Hi<｜end▁of▁sentence｜>rules<｜latest_reminder｜>Be brief"
+    },
+    {
+      "name": "v4/consecutive-reminders/thinking=False",
+      "model_type": "deepseek_v4",
+      "thinking": false,
+      "messages": [
+        {
+          "role": "user",
+          "content": "Hello"
+        },
+        {
+          "role": "latest_reminder",
+          "content": "First"
+        },
+        {
+          "role": "latest_reminder",
+          "content": "Second"
+        }
+      ],
+      "prompt": "<｜begin▁of▁sentence｜><｜User｜>Hello<｜Assistant｜></think><｜latest_reminder｜>First<｜latest_reminder｜>Second"
+    },
+    {
+      "name": "v4/user-reminder/thinking=True",
+      "model_type": "deepseek_v4",
+      "thinking": true,
+      "messages": [
+        {
+          "role": "user",
+          "content": "Hello"
+        },
+        {
+          "role": "latest_reminder",
+          "content": "Be brief"
+        }
+      ],
+      "prompt": "<｜begin▁of▁sentence｜><｜User｜>Hello<｜Assistant｜><think><｜latest_reminder｜>Be brief"
+    },
+    {
+      "name": "v4/developer-reminder/thinking=True",
+      "model_type": "deepseek_v4",
+      "thinking": true,
+      "messages": [
+        {
+          "role": "developer",
+          "content": "rules"
+        },
+        {
+          "role": "latest_reminder",
+          "content": "Be brief"
+        }
+      ],
+      "prompt": "<｜begin▁of▁sentence｜><｜User｜>rules<｜Assistant｜><think><｜latest_reminder｜>Be brief"
+    },
+    {
+      "name": "v4/mid-system-reminder/thinking=True",
+      "model_type": "deepseek_v4",
+      "thinking": true,
+      "messages": [
+        {
+          "role": "user",
+          "content": "Hello"
+        },
+        {
+          "role": "assistant",
+          "content": "Hi"
+        },
+        {
+          "role": "system",
+          "content": "rules"
+        },
+        {
+          "role": "latest_reminder",
+          "content": "Be brief"
+        }
+      ],
+      "prompt": "<｜begin▁of▁sentence｜><｜User｜>Hello<｜Assistant｜><think></think>Hi<｜end▁of▁sentence｜>rules<｜latest_reminder｜>Be brief"
+    },
+    {
+      "name": "v4/consecutive-reminders/thinking=True",
+      "model_type": "deepseek_v4",
+      "thinking": true,
+      "messages": [
+        {
+          "role": "user",
+          "content": "Hello"
+        },
+        {
+          "role": "latest_reminder",
+          "content": "First"
+        },
+        {
+          "role": "latest_reminder",
+          "content": "Second"
+        }
+      ],
+      "prompt": "<｜begin▁of▁sentence｜><｜User｜>Hello<｜Assistant｜><think><｜latest_reminder｜>First<｜latest_reminder｜>Second"
+    },
+    {
+      "name": "v41/user-reminder/thinking=False",
+      "model_type": "deepseek_v41",
+      "thinking": false,
+      "messages": [
+        {
+          "role": "user",
+          "content": "Hello"
+        },
+        {
+          "role": "latest_reminder",
+          "content": "Be brief"
+        }
+      ],
+      "prompt": "<｜begin▁of▁sentence｜><｜User｜>Hello<｜Assistant｜></think><｜latest_reminder｜>Be brief"
+    },
+    {
+      "name": "v41/developer-reminder/thinking=False",
+      "model_type": "deepseek_v41",
+      "thinking": false,
+      "messages": [
+        {
+          "role": "developer",
+          "content": "rules"
+        },
+        {
+          "role": "latest_reminder",
+          "content": "Be brief"
+        }
+      ],
+      "prompt": "<｜begin▁of▁sentence｜><｜User｜>rules<｜Assistant｜></think><｜latest_reminder｜>Be brief"
+    },
+    {
+      "name": "v41/mid-system-reminder/thinking=False",
+      "model_type": "deepseek_v41",
+      "thinking": false,
+      "messages": [
+        {
+          "role": "user",
+          "content": "Hello"
+        },
+        {
+          "role": "assistant",
+          "content": "Hi"
+        },
+        {
+          "role": "system",
+          "content": "rules"
+        },
+        {
+          "role": "latest_reminder",
+          "content": "Be brief"
+        }
+      ],
+      "prompt": "<｜begin▁of▁sentence｜><｜User｜>Hello<｜Assistant｜></think>Hi<｜end▁of▁sentence｜><｜System｜>rules<｜Assistant｜></think><｜latest_reminder｜>Be brief"
+    },
+    {
+      "name": "v41/consecutive-reminders/thinking=False",
+      "model_type": "deepseek_v41",
+      "thinking": false,
+      "messages": [
+        {
+          "role": "user",
+          "content": "Hello"
+        },
+        {
+          "role": "latest_reminder",
+          "content": "First"
+        },
+        {
+          "role": "latest_reminder",
+          "content": "Second"
+        }
+      ],
+      "prompt": "<｜begin▁of▁sentence｜><｜User｜>Hello<｜Assistant｜></think><｜latest_reminder｜>First<｜latest_reminder｜>Second"
+    },
+    {
+      "name": "v41/user-reminder/thinking=True",
+      "model_type": "deepseek_v41",
+      "thinking": true,
+      "messages": [
+        {
+          "role": "user",
+          "content": "Hello"
+        },
+        {
+          "role": "latest_reminder",
+          "content": "Be brief"
+        }
+      ],
+      "prompt": "<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 75 (range 1-100, the higher the value, the more thorough the reasoning)\n\n<｜User｜>Hello<｜Assistant｜><think><｜latest_reminder｜>Be brief"
+    },
+    {
+      "name": "v41/developer-reminder/thinking=True",
+      "model_type": "deepseek_v41",
+      "thinking": true,
+      "messages": [
+        {
+          "role": "developer",
+          "content": "rules"
+        },
+        {
+          "role": "latest_reminder",
+          "content": "Be brief"
+        }
+      ],
+      "prompt": "<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 75 (range 1-100, the higher the value, the more thorough the reasoning)\n\n<｜User｜>rules<｜Assistant｜><think><｜latest_reminder｜>Be brief"
+    },
+    {
+      "name": "v41/mid-system-reminder/thinking=True",
+      "model_type": "deepseek_v41",
+      "thinking": true,
+      "messages": [
+        {
+          "role": "user",
+          "content": "Hello"
+        },
+        {
+          "role": "assistant",
+          "content": "Hi"
+        },
+        {
+          "role": "system",
+          "content": "rules"
+        },
+        {
+          "role": "latest_reminder",
+          "content": "Be brief"
+        }
+      ],
+      "prompt": "<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 75 (range 1-100, the higher the value, the more thorough the reasoning)\n\n<｜User｜>Hello<｜Assistant｜></think>Hi<｜end▁of▁sentence｜><｜System｜>rules<｜Assistant｜><think><｜latest_reminder｜>Be brief"
+    },
+    {
+      "name": "v41/consecutive-reminders/thinking=True",
+      "model_type": "deepseek_v41",
+      "thinking": true,
+      "messages": [
+        {
+          "role": "user",
+          "content": "Hello"
+        },
+        {
+          "role": "latest_reminder",
+          "content": "First"
+        },
+        {
+          "role": "latest_reminder",
+          "content": "Second"
+        }
+      ],
+      "prompt": "<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 75 (range 1-100, the higher the value, the more thorough the reasoning)\n\n<｜User｜>Hello<｜Assistant｜><think><｜latest_reminder｜>First<｜latest_reminder｜>Second"
+    }
+  ]
+}
