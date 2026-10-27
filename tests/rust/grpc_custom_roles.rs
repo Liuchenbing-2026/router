@@ -32,7 +32,7 @@ async fn developer_extensions_return_400_without_template_rendering_or_dispatch(
     let mut tokenizer_config: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
     tokenizer_config["chat_template"] = json!(
-        "{% for m in messages %}{{ m.role }}|{{ m.content }}|{{ m.metadata.step }};{% endfor %}"
+        "{% for m in messages %}{% set metadata = m.metadata | default({}) %}{{ m.role }}|{{ m.content }}|{{ metadata.step | default(0) }};{% endfor %}"
     );
     std::fs::write(&path, tokenizer_config.to_string()).unwrap();
     let worker = MockVllmRsServer::spawn().await;
