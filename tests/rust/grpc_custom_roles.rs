@@ -410,7 +410,7 @@ async fn deepseek_reminder_matches_pinned_python_compatibility_reference() {
         let request: ChatCompletionRequest = serde_json::from_value(json!({
             "model": model.path().to_str().unwrap(),
             "messages": case["messages"],
-            "chat_template_kwargs": {"thinking": case["thinking"]},
+            "chat_template_kwargs": case["template_kwargs"],
             "max_tokens": 1
         }))
         .unwrap();

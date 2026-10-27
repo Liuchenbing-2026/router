@@ -122,6 +122,12 @@ at the same fixed revision as the frontend. The fixture
 prompts, source hashes, both dialects, and chat/thinking modes. The gRPC test
 compares all token IDs of those prompts with the IDs sent to a mock worker;
 it does not use real DeepSeek weights.
+These fixtures use string content and explicitly set `reasoning_effort=low`
+in both the Python encoder and frontend template kwargs. For V4, the frontend
+resolves omitted effort to high in thinking mode, whereas the raw Python
+encoder's omitted argument does not add that prefix. Comparing those different controls
+would test a parameter mismatch rather than a reminder boundary. The fixtures
+do not establish parity for omitted defaults or content-parts normalization.
 
 DeepSeek's official
 [deepseek-recipe](https://github.com/deepseek-ai/deepseek-recipe/tree/935817c66f5d6e64838f419692545f06787e485f)
