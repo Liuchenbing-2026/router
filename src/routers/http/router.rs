@@ -538,6 +538,7 @@ impl Router {
             let monitor_interval = ctx.router_config.worker_startup_check_interval_secs;
             let policy_clone = default_policy.clone();
             let client_clone = ctx.client.clone();
+            let api_key = ctx.router_config.api_key.clone();
 
             Some(Arc::new(tokio::spawn(async move {
                 Self::monitor_worker_loads(
@@ -546,6 +547,7 @@ impl Router {
                     monitor_interval,
                     policy_clone,
                     client_clone,
+                    api_key,
                 )
                 .await;
             })))
@@ -2553,11 +2555,13 @@ impl Router {
             worker_url
         };
 
-        match self
-            .client
-            .get(format!("{}/get_load", worker_url))
-            .send()
-            .await
+        match worker_get(
+            &self.client,
+            &format!("{}/get_load", worker_url),
+            self.api_key.as_deref(),
+        )
+        .send()
+        .await
         {
             Ok(res) if res.status().is_success() => match res.bytes().await {
                 Ok(bytes) => match serde_json::from_slice::<serde_json::Value>(&bytes) {
@@ -2597,6 +2601,7 @@ impl Router {
         interval_secs: u64,
         policy: Arc<dyn LoadBalancingPolicy>,
         client: Client,
+        api_key: Option<String>,
     ) {
         let mut interval = tokio::time::interval(Duration::from_secs(interval_secs));
 
@@ -2605,7 +2610,9 @@ impl Router {
 
             let mut loads = HashMap::new();
             for url in &worker_urls {
-                if let Some(load) = Self::get_worker_load_static(&client, url).await {
+                if let Some(load) =
+                    Self::get_worker_load_static(&client, url, api_key.as_deref()).await
+                {
                     loads.insert(url.clone(), load);
                 }
             }
@@ -2623,7 +2630,11 @@ impl Router {
     }
 
     // Static version of get_worker_load for use in monitoring task
-    async fn get_worker_load_static(client: &reqwest::Client, worker_url: &str) -> Option<isize> {
+    async fn get_worker_load_static(
+        client: &reqwest::Client,
+        worker_url: &str,
+        api_key: Option<&str>,
+    ) -> Option<isize> {
         let worker_url = if worker_url.contains("@") {
             // Need to extract the URL from "http://host:port@dp_rank"
             let (worker_url_prefix, _dp_rank) = match dp_utils::extract_dp_rank(worker_url) {
@@ -2638,7 +2649,10 @@ impl Router {
             worker_url
         };
 
-        match client.get(format!("{}/get_load", worker_url)).send().await {
+        match worker_get(client, &format!("{}/get_load", worker_url), api_key)
+            .send()
+            .await
+        {
             Ok(res) if res.status().is_success() => match res.bytes().await {
                 Ok(bytes) => match serde_json::from_slice::<serde_json::Value>(&bytes) {
                     Ok(data) => data
@@ -2966,7 +2980,7 @@ impl RouterTrait for Router {
         // Get all worker URLs
         let worker_urls = self.get_worker_urls();
 
-        // Send requests to all workers concurrently without headers
+        // Send requests to all workers concurrently with configured authentication
         let mut tasks = Vec::new();
         for worker_url in &worker_urls {
             let worker_url = if self.intra_node_data_parallel_size > 1 {
@@ -2986,7 +3000,10 @@ impl RouterTrait for Router {
             } else {
                 worker_url
             };
-            let request_builder = self.client.post(format!("{}/flush_cache", worker_url));
+            let mut request_builder = self.client.post(format!("{}/flush_cache", worker_url));
+            if let Some(key) = &self.api_key {
+                request_builder = request_builder.bearer_auth(key);
+            }
             tasks.push(request_builder.send());
         }
 
@@ -7396,6 +7413,166 @@ mod tests {
             axum::serve(listener, app).await.unwrap();
         });
         (format!("http://{}", addr), handle)
+    }
+
+    async fn assert_worker_management_auth(api_key: Option<&str>, dp_size: usize) {
+        assert_worker_management_auth_case(api_key, dp_size, false, 1).await;
+    }
+
+    async fn assert_worker_management_auth_case(
+        api_key: Option<&str>,
+        dp_size: usize,
+        rejected: bool,
+        workers: usize,
+    ) {
+        use crate::config::{PolicyConfig, RouterConfig};
+        use axum::{
+            routing::{get, post},
+            Router as AxumRouter,
+        };
+        let expected = api_key.map(|key| format!("Bearer {key}"));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let load_key = expected.clone();
+        let flush_key = expected.clone();
+        let app = AxumRouter::new()
+            .route("/health", get(|| async { StatusCode::OK }))
+            .route(
+                "/get_load",
+                get(move |headers: HeaderMap| async move {
+                    if headers
+                        .get(http::header::AUTHORIZATION)
+                        .map(|v| v.as_bytes())
+                        == load_key.as_deref().map(str::as_bytes)
+                    {
+                        (StatusCode::OK, "{\"load\":7}")
+                    } else {
+                        (StatusCode::UNAUTHORIZED, "unauthorized")
+                    }
+                }),
+            )
+            .route(
+                "/flush_cache",
+                post(move |headers: HeaderMap| async move {
+                    if headers
+                        .get(http::header::AUTHORIZATION)
+                        .map(|v| v.as_bytes())
+                        == flush_key.as_deref().map(str::as_bytes)
+                    {
+                        StatusCode::OK
+                    } else {
+                        StatusCode::UNAUTHORIZED
+                    }
+                }),
+            );
+        let mut urls = vec![url.clone()];
+        let mut servers = Vec::new();
+        for _ in 1..workers {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            urls.push(format!("http://{}", listener.local_addr().unwrap()));
+            let app = app.clone();
+            servers.push(tokio::spawn(async move {
+                axum::serve(listener, app).await.unwrap();
+            }));
+        }
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let config = RouterConfig {
+            api_key: if rejected {
+                Some("wrong-test-key".to_owned())
+            } else {
+                api_key.map(str::to_owned)
+            },
+            intra_node_data_parallel_size: dp_size,
+            policy: PolicyConfig::PowerOfTwo {
+                load_check_interval_secs: 1,
+            },
+            worker_startup_timeout_secs: 5,
+            worker_startup_check_interval_secs: 1,
+            ..Default::default()
+        };
+        let (router, _ctx) = start_router(config, urls).await;
+        let worker_url = if dp_size > 1 {
+            format!("{url}@0")
+        } else {
+            url.clone()
+        };
+        let load = router.get_worker_load(&worker_url).await;
+        let flush_status = router.flush_cache().await.status();
+        let response = router.get_worker_loads().await;
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let loads: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let mut rx = router._worker_loads.as_ref().clone();
+        let monitored = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if rx.borrow().len() == workers * dp_size
+                    && rx.borrow().values().all(|load| *load == 7)
+                {
+                    return true;
+                }
+                if rx.changed().await.is_err() {
+                    return false;
+                }
+            }
+        })
+        .await
+        .unwrap_or(false);
+        if let Some(task) = &router._load_monitor_handle {
+            task.abort();
+        }
+        if let Some(task) = &router._kv_signal_handle {
+            task.abort();
+        }
+        if let Some(supervisor) = &router.kv_index_supervisor {
+            supervisor.shutdown();
+        }
+        server.abort();
+        for server in servers {
+            server.abort();
+        }
+        let entries = loads["workers"].as_array().unwrap();
+        assert_eq!(entries.len(), workers * dp_size);
+        if rejected {
+            assert_eq!(
+                (load, flush_status, monitored),
+                (None, StatusCode::INTERNAL_SERVER_ERROR, false)
+            );
+            assert!(entries.iter().all(|entry| entry["load"] == -1));
+        } else {
+            assert_eq!(
+                (load, flush_status, monitored),
+                (Some(7), StatusCode::OK, true)
+            );
+            assert!(entries.iter().all(|entry| entry["load"] == 7));
+        }
+    }
+
+    #[tokio::test]
+    async fn test_worker_management_auth_key() {
+        assert_worker_management_auth(Some("test-worker-key"), 1).await;
+    }
+
+    #[tokio::test]
+    async fn test_worker_management_auth_no_key() {
+        assert_worker_management_auth(None, 1).await;
+    }
+
+    #[tokio::test]
+    async fn test_worker_management_auth_dp() {
+        assert_worker_management_auth(Some("test-worker-key"), 2).await;
+    }
+
+    #[tokio::test]
+    async fn test_worker_management_auth_rejected() {
+        assert_worker_management_auth_case(Some("test-worker-key"), 1, true, 1).await;
+    }
+
+    #[tokio::test]
+    async fn test_worker_management_auth_multiple_workers() {
+        assert_worker_management_auth_case(Some("test-worker-key"), 1, false, 2).await;
     }
 
     /// Helper: start a server that accepts connections and never answers.
