@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use dashmap::DashMap;
+use dashmap::{mapref::entry::Entry, DashMap};
 use parking_lot::RwLock;
 
 use crate::kv_index::types::{
@@ -49,6 +49,7 @@ std::thread_local! {
 }
 
 #[cfg(all(test, feature = "cpu", feature = "ready"))]
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn after_anchor_clone() {
     let hook = AFTER_ANCHOR_CLONE.with(|slot| slot.borrow_mut().take());
     if let Some(hook) = hook {
@@ -57,6 +58,7 @@ fn after_anchor_clone() {
 }
 
 #[cfg(all(test, feature = "cpu", feature = "ready"))]
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn after_query_edge() {
     let hook = AFTER_QUERY_EDGE.with(|slot| slot.borrow_mut().take());
     if let Some(hook) = hook {
@@ -569,9 +571,19 @@ impl KvBlockIndexer {
 
     /// Enable fresh observations after complete replay, or after discarding
     /// incomplete replay and applying a new valid live batch to a clean source.
+    /// Already-active sources must not invalidate concurrent query snapshots.
     pub fn resume_source(&self, source: &SourceId, dp_rank: u32) {
-        self.source_generation.fetch_add(1, Ordering::AcqRel);
-        self.suspended_sources.remove(&(source.clone(), dp_rank));
+        if let Entry::Occupied(entry) = self.suspended_sources.entry((source.clone(), dp_rank)) {
+            // Fence the visibility transition before removing its hidden state.
+            self.source_generation.fetch_add(1, Ordering::AcqRel);
+            entry.remove();
+        }
+    }
+
+    #[cfg(all(test, feature = "cpu", feature = "ready"))]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    pub(super) fn source_generation_for_test(&self) -> u64 {
+        self.source_generation.load(Ordering::Acquire)
     }
 
     pub fn find_matches(&self, query: &MatchQuery) -> Vec<TierMatch> {
@@ -605,6 +617,7 @@ impl crate::policies::TieredMatchProvider for KvBlockIndexer {
 }
 
 #[cfg(all(test, feature = "cpu", feature = "ready"))]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use std::{cell::Cell, rc::Rc};
 
@@ -679,7 +692,13 @@ mod tests {
             );
         }
         let source = SourceId::from("a");
+        let generation = idx.source_generation_for_test();
+        for _ in 0..3 {
+            idx.resume_source(&source, 0);
+        }
+        assert_eq!(idx.source_generation_for_test(), generation);
         idx.suspend_source(&source, 0);
+        assert_eq!(idx.source_generation_for_test(), generation + 1);
         for group in [0, 1] {
             let hits = idx.find_matches(&query_group(group, &["x"], &tiers));
             assert_eq!(hits.len(), 2);
@@ -689,9 +708,14 @@ mod tests {
         }
         // Complete replay may resume credit without forgetting still-valid claims.
         idx.resume_source(&source, 0);
+        assert_eq!(idx.source_generation_for_test(), generation + 2);
         assert_eq!(idx.find_matches(&query(&["x"], &tiers)).len(), 5);
-        idx.invalidate_source(&source, 0);
         idx.resume_source(&source, 0);
+        assert_eq!(idx.source_generation_for_test(), generation + 2);
+        idx.invalidate_source(&source, 0);
+        assert_eq!(idx.source_generation_for_test(), generation + 3);
+        idx.resume_source(&source, 0);
+        assert_eq!(idx.source_generation_for_test(), generation + 4);
         for group in [0, 1] {
             assert_eq!(
                 idx.find_matches(&query_group(group, &["x"], &tiers)).len(),
@@ -708,6 +732,27 @@ mod tests {
         );
         assert_eq!(idx.find_matches(&query(&["y"], &tiers)).len(), 1);
         assert_eq!(idx.find_matches(&query(&["x"], &tiers)).len(), 2);
+    }
+
+    #[test]
+    fn query_keeps_snapshot_when_active_source_is_resumed() {
+        let idx = Arc::new(KvBlockIndexer::new());
+        idx.store(
+            0,
+            worker("a"),
+            StorageTier::Device,
+            None,
+            &[(h("s"), h("x"))],
+        );
+        let resuming = idx.clone();
+        AFTER_QUERY_EDGE.with(|slot| {
+            *slot.borrow_mut() = Some(Box::new(move || {
+                resuming.resume_source(&SourceId::from("a"), 0);
+            }));
+        });
+        let hits = idx.find_matches(&query(&["x"], &[StorageTier::Device]));
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].segments, [(0, 1)]);
     }
 
     #[test]

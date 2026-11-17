@@ -82,6 +82,7 @@ impl RequestPool {
 
     /// Return the front request only when `handle` still names that request.
     #[cfg(all(test, feature = "cpu", feature = "ready"))]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub(crate) fn front(&self, handle: &ProgramRequestHandle) -> Option<&PendingProgramRequest> {
         self.requests
             .get(handle.program())
@@ -156,9 +157,18 @@ impl RequestPool {
             .and_then(VecDeque::front)
             .map(|request| &request.hints)
     }
+
+    /// Prompt estimate belonging to the Program's front (oldest) retained turn.
+    pub(crate) fn front_context_tokens(&self, program: &ProgramRef) -> Option<usize> {
+        self.requests
+            .get(program)
+            .and_then(VecDeque::front)
+            .map(|request| request.estimated_context_tokens)
+    }
 }
 
 #[cfg(all(test, feature = "cpu", feature = "ready"))]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
 

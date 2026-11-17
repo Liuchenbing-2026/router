@@ -360,7 +360,22 @@ mod test_pd_routing {
             .unwrap()
             .consumer_zmq_addrs
             .insert(format!("{base}/d"), "tcp://localhost:1234".into());
-        assert!(ConfigValidator::validate(&config).is_err());
+        ConfigValidator::validate(&config).unwrap();
+        let invalid_context = Arc::new(
+            vllm_router_rs::server::AppContext::new(
+                config.clone(),
+                reqwest::Client::new(),
+                64,
+                None,
+                vec![],
+            )
+            .unwrap(),
+        );
+        let error = RouterFactory::create_router(&invalid_context)
+            .await
+            .err()
+            .unwrap();
+        assert!(error.contains("consumer_zmq_addrs"), "{error}");
         config.epd.as_mut().unwrap().consumer_zmq_addrs.clear();
         ConfigValidator::validate(&config).unwrap();
         let context = Arc::new(
@@ -781,6 +796,7 @@ mod test_pd_routing {
         for (mode, policy) in test_cases {
             let config = RouterConfig {
                 mode,
+                pd_kv_event_sources: Default::default(),
                 policy,
                 host: "127.0.0.1".to_string(),
                 port: 3001,
