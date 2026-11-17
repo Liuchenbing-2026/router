@@ -181,7 +181,8 @@ fn validate_wire_hash(hash: &Value) -> Result<(), String> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "cpu", feature = "ready"))]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
     use crate::kv_index::validate_device_batch;

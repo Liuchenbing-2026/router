@@ -14,8 +14,9 @@ upstream `kv_aware` policies keep their behavior.
 
 The old branch called this runtime `kv_aware`. Use `trusted_kv_aware` when
 updating that branch's service commands or serialized policy configuration.
-The main policy's name and settings are not aliases for this runtime. Both
-modes are regular-routing policies; neither can be selected for P/D stages.
+The main policy's name and settings are not aliases for this runtime. Upstream
+`kv_aware` supports stage-specific P/D routing; `trusted_kv_aware` remains
+restricted to regular co-located routing.
 The trusted mode also rejects a disaggregated configuration when both stage
 policies override its main-policy setting, matching its Rust validator.
 
@@ -31,22 +32,22 @@ replace Rust compilation, the runtime tests or real-engine acceptance.
 
 ## Scoped regression after the main integration
 
-The integration base is `ba9fc05b2692c829700f97e250eb3194bb9be002`.
+The integration base is `92030879116e9fc94dfd5163e6c54b9c5ecb331b`.
 Use the following CPU regressions to check policy/configuration separation,
 stream/cancellation cleanup, selected HTTP rank and prepared-token gRPC routing:
 
 ```bash
-cargo +1.95.0 test --locked --lib policies::factory::tests::test_kv_policy_modes_keep_distinct_capabilities -- --exact
-cargo +1.95.0 test --locked --lib policies::factory::tests::test_trusted_limits_do_not_replace_upstream_cost_parameters -- --exact
-cargo +1.95.0 test --locked --test kv_aware_runtime stream_drop_and_cancellation_before_headers_release_exactly_one_load_slot -- --exact
-cargo +1.95.0 test --locked --test kv_aware_runtime real_http_forwarding_selects_dp_rank_and_replaces_client_rank_header -- --exact
-cargo +1.95.0 test --locked --test kv_aware_runtime grpc_control_discovery_and_prepared_tokens_select_the_holding_rank_on_the_wire -- --exact
+cargo test --locked --features cpu,ready --lib policies::factory::tests::test_kv_policy_modes_keep_distinct_capabilities -- --exact
+cargo test --locked --features cpu,ready --lib policies::factory::tests::test_trusted_limits_do_not_replace_upstream_cost_parameters -- --exact
+cargo test --locked --features cpu,ready --test kv_aware_runtime stream_drop_and_cancellation_before_headers_release_exactly_one_load_slot -- --exact
+cargo test --locked --features cpu,ready --test kv_aware_runtime real_http_forwarding_selects_dp_rank_and_replaces_client_rank_header -- --exact
+cargo test --locked --features cpu,ready --test kv_aware_runtime grpc_control_discovery_and_prepared_tokens_select_the_holding_rank_on_the_wire -- --exact
 ```
 
 These commands define the scoped regression; their execution receipt must be
 bound to the tested commit. The historical results below are not results of
-this main integration. This conflict update also does not close the separate
-cross-source reconciliation review.
+this main integration. Cross-source reconciliation and explicit-model regressions are covered by
+`kv_index::runtime::human_review_tests` and the `kv_aware_runtime` test target.
 
 ## Running the policy
 
@@ -221,9 +222,13 @@ Choose currently idle cards and unused ports before executing; the numbers below
 are the actual task allocation, not an ongoing resource reservation.
 
 ```bash
-mkdir -p /data2/router-kv-agent-real-20261015
-cp examples/kv_aware_acceptance/serve_native.py /data2/router-kv-agent-real-20261015/
-cp examples/kv_aware_acceptance/accept_native.py /data2/router-kv-agent-real-20261015/
+export WORK_DIR="<WORK_DIR>"
+export HOST_MOUNT_2="<HOST_MOUNT_2>"
+export WEIGHTS_DIR="<WEIGHTS_DIR>"
+
+mkdir -p "${WORK_DIR}"
+cp examples/kv_aware_acceptance/serve_native.py "${WORK_DIR}"
+cp examples/kv_aware_acceptance/accept_native.py "${WORK_DIR}"
 for task_card in 2 3; do
   docker run -d --name router-kv-real-npu${task_card}-20261015 \
     --label router.task=kv-agent-real-20261015 --network host \
@@ -232,9 +237,9 @@ for task_card in 2 3; do
     -v /usr/local/dcmi:/usr/local/dcmi:ro \
     -v /usr/local/sbin/npu-smi:/usr/local/sbin/npu-smi:ro \
     -v /etc/ascend_install.info:/etc/ascend_install.info:ro \
-    -v /data2/router-tokenizer-cache-20261011:/work:ro \
-    -v /data2/models/Qwen/Qwen3-8B:/models/qwen3-8b:ro \
-    -v /data2/router-kv-agent-real-20261015:/experiment \
+    -v "${HOST_MOUNT_2}:/work:ro" \
+    -v "${WEIGHTS_DIR}:/models/qwen3-8b:ro" \
+    -v "${WORK_DIR}:/experiment" \
     --device /dev/davinci${task_card}:/dev/davinci${task_card}:rwm \
     --device /dev/davinci_manager:/dev/davinci_manager:rwm \
     --device /dev/devmm_svm:/dev/devmm_svm:rwm \
@@ -298,3 +303,19 @@ after both result files were complete. Only task-owned router processes and
 containers were stopped; selected cards had no running processes at cleanup.
 This was not whole-host CPU isolation, a confidence-interval study, full model
 precision certification or an Agent benchmark.
+
+### Discovery and explicit-model fallback
+
+Metadata discovery is optional for serving. Startup probes run concurrently
+(up to eight at once) under one pool budget, capped by both ten seconds and
+`worker_startup_timeout_secs`. When that budget expires, incomplete workers
+remain eligible for load-only fallback; they never receive exact KV credit.
+
+For an explicit model, available workers confirmed by registry labels or
+validated discovery take priority over unlabeled workers. Unlabeled fallback
+remains available when no eligible worker confirms the requested model. A
+conflicting explicit registry label is never broadened by discovery aliases.
+
+A source cannot publish store/remove deltas into the shared index before a
+validated completeness barrier. Sequence gaps revoke its old claims; ignored
+pre-barrier stores cannot consume another source's shared index budget.

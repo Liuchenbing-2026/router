@@ -42,6 +42,9 @@ impl LoadBalancingPolicy for TrustedKvAwarePolicy {
         self.select_with_tokens(workers, None, None, false)
             .map(|(idx, _)| idx)
     }
+    fn tracks_request_load(&self) -> bool {
+        true
+    }
     fn name(&self) -> &'static str {
         "trusted_kv_aware"
     }

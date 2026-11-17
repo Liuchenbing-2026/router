@@ -293,7 +293,8 @@ impl ProgramScheduler {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "cpu", feature = "ready"))]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
     use crate::program_scheduling::{ProgramIdentity, ProgramSchedulerConfig, ProgramTarget};

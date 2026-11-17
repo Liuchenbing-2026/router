@@ -3,8 +3,9 @@
 //! Worker pool is all-`http(s)://` or all-`grpc://`. Mixed schemes fail
 //! at init / `add_worker` (gRPC is `token_ids` only).
 //!
-//! - All-HTTP: policy selects, then `router.rs` reverse-proxies OpenAI JSON
-//!   (no chat/tokenizer frontend on the critical path).
+//! - All-HTTP: KV-aware routing obtains exact inputs from token arrays or
+//!   the workers' render endpoints, then `router.rs` proxies OpenAI JSON.
+//!   Other policies do not prepare tokens.
 //! - All-gRPC: `EngineFrontend::prepare(chat)` → `token_ids`, then policy
 //!   selects, then `EngineFrontend::dispatch` (`convert` + GenerateStream +
 //!   detok).
@@ -15,6 +16,7 @@
 //! `VLLM_ROUTER_STAGES=1` emits stage clocks. gRPC always tokenizes; HTTP
 //! remains a transparent proxy and reports worker header/first-byte timings.
 
+pub mod completion;
 pub mod control;
 pub mod convert;
 pub mod detect;
@@ -22,8 +24,10 @@ pub(crate) mod encode_cache;
 pub mod frontend;
 pub mod grpc;
 pub mod health;
+pub(crate) mod l1_encode_cache;
 pub mod openai;
 pub mod preprocess;
+mod tokenizer_determinism;
 mod vllm_frontend;
 
 /// Opt-in router stage clocks.
@@ -34,17 +38,23 @@ pub fn stages_enabled() -> bool {
     )
 }
 
-pub use control::{
-    get_grpc_model_info, get_grpc_server_info, model_info_json, openai_models_json,
-    server_info_json,
+pub use completion::{
+    prepare_completion, prepare_completion_classified, validate_completion_tokenizer_definition,
+    CompletionPreparationError,
 };
+pub use control::{
+    get_grpc_model_info, get_grpc_server_info, grpc_engine_version_older_than_0_30,
+    model_info_json, openai_models_json, server_info_json, warn_old_grpc_pd_workers,
+};
+pub use convert::prepare_grpc_completion;
 pub use detect::{
     classify_worker_urls, connection_mode_from_url, grpc_connect_uri, is_grpc_url, parse_dp_rank,
     strip_dp_suffix, WorkerPoolKind,
 };
-pub use frontend::{EngineFrontend, PreparedChat};
+pub use frontend::{EngineFrontend, PrepareError, PreparedRequest};
 pub use grpc::GrpcEngineBackend;
 pub use health::check_grpc_health;
+pub use l1_encode_cache::{L1CacheConfig, L1CacheStats, L1HashStrategy};
 pub use preprocess::TokenizerCache;
 
 /// Prost/Tonic bindings for vLLM Inference + Control (`vllm-proto` on crates.io).
@@ -125,7 +135,8 @@ pub(crate) mod stream_output {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "cpu", feature = "ready"))]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     mod tests {
         use super::*;
 
