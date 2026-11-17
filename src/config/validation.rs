@@ -190,6 +190,61 @@ impl ConfigValidator {
                     .to_string(),
             });
         }
+        let prediction = &config.prediction_profile;
+        if !prediction.snapshot_interval_seconds.is_finite()
+            || prediction.snapshot_interval_seconds <= 0.0
+            || !prediction.prior_weight.is_finite()
+            || prediction.prior_weight < 0.0
+            || prediction.max_keys == 0
+            || prediction.return_time_min_support == 0
+            || prediction.output_length_min_support == 0
+            || prediction.output_length_tail_samples == 0
+            || prediction.stability_window_size == 0
+            || prediction.step_bucket_size == 0
+        {
+            return Err(ConfigError::ValidationFailed {
+                reason: "Prediction profile intervals, weights, supports, windows, and limits must be valid and non-zero".to_string(),
+            });
+        }
+        if !prediction.return_time_horizon_seconds.is_finite()
+            || prediction.return_time_horizon_seconds <= 0.0
+            || !prediction.output_length_quantile.is_finite()
+            || !(0.0..1.0).contains(&prediction.output_length_quantile)
+            || !prediction.stability_tolerance.is_finite()
+            || prediction.stability_tolerance < 0.0
+        {
+            return Err(ConfigError::ValidationFailed {
+                reason: "Prediction horizons, quantiles, and stability tolerance are invalid"
+                    .to_string(),
+            });
+        }
+        if !strictly_increasing_f64(&prediction.return_time_bucket_bounds_seconds)
+            || !strictly_increasing_usize(&prediction.output_length_bucket_bounds_tokens)
+        {
+            return Err(ConfigError::ValidationFailed {
+                reason:
+                    "Prediction bucket bounds must be non-empty, positive, and strictly increasing"
+                        .to_string(),
+            });
+        }
+        if prediction.mode != PredictionMode::Off {
+            if let Some(path) = prediction.profile_path.as_deref() {
+                let raw = std::fs::read_to_string(path).map_err(|error| {
+                    ConfigError::ValidationFailed {
+                        reason: format!("Unable to read prediction profile '{path}': {error}"),
+                    }
+                })?;
+                crate::program_scheduling::prediction_profile::validate_profile_json(
+                    &raw,
+                    &prediction.return_time_bucket_bounds_seconds,
+                    &prediction.output_length_bucket_bounds_tokens,
+                    prediction.max_keys,
+                )
+                .map_err(|error| ConfigError::ValidationFailed {
+                    reason: format!("Invalid prediction profile '{path}': {error}"),
+                })?;
+            }
+        }
         Ok(())
     }
 
@@ -210,9 +265,9 @@ impl ConfigValidator {
                 })
             }
         };
-        if config.intra_node_data_parallel_size != 1 || config.enable_igw {
+        if config.enable_igw {
             return Err(ConfigError::ValidationFailed {
-                reason: "EPD currently requires DP=1 and proxy mode".into(),
+                reason: "EPD currently requires proxy mode".into(),
             });
         }
         if epd.encoder_urls.is_empty() {
@@ -231,18 +286,6 @@ impl ConfigValidator {
             }
         }
         if !epd.consumer_zmq_addrs.is_empty() {
-            if worker_urls.is_empty()
-                || epd.consumer_zmq_addrs.len() != worker_urls.len()
-                || worker_urls
-                    .iter()
-                    .any(|url| !epd.consumer_zmq_addrs.contains_key(*url))
-            {
-                return Err(ConfigError::ValidationFailed {
-                    reason:
-                        "EPD consumer_zmq_addrs must map every embedding consumer URL exactly once"
-                            .into(),
-                });
-            }
             for addr in epd.consumer_zmq_addrs.values() {
                 let parsed = url::Url::parse(addr).map_err(|e| ConfigError::ValidationFailed {
                     reason: format!("Invalid EC address: {e}"),
@@ -314,6 +357,18 @@ impl ConfigValidator {
                     all.extend(decode_urls.iter().cloned());
                     Self::reject_mixed_worker_urls(&all)?;
                 }
+                // Discovered P/D workers register as http://, so a grpc://
+                // static pool would end up mixed at runtime.
+                let has_grpc_url = prefill_urls
+                    .iter()
+                    .map(|(url, _)| url.as_str())
+                    .chain(decode_urls.iter().map(String::as_str))
+                    .any(crate::backend::is_grpc_url);
+                if has_service_discovery && has_grpc_url {
+                    return Err(ConfigError::ValidationFailed {
+                        reason: "grpc:// P/D workers cannot be combined with service discovery, which registers http:// workers".to_string(),
+                    });
+                }
 
                 // Validate bootstrap ports
                 for (_url, port) in prefill_urls {
@@ -375,7 +430,7 @@ impl ConfigValidator {
                     });
                 }
 
-                if *balance_rel_threshold < 1.0 {
+                if !(1.0..).contains(balance_rel_threshold) {
                     return Err(ConfigError::InvalidValue {
                         field: "balance_rel_threshold".to_string(),
                         value: balance_rel_threshold.to_string(),
@@ -449,6 +504,10 @@ impl ConfigValidator {
                         reason: "Must be > 0".to_string(),
                     });
                 }
+            }
+            PolicyConfig::StickyLeastLoaded => {
+                // Session expiration is sourced from the environment; no
+                // structured config to validate here.
             }
             PolicyConfig::RendezvousHash => {
                 // No specific validation needed
@@ -596,7 +655,7 @@ impl ConfigValidator {
                 reason: "Must be >= initial_backoff_ms".to_string(),
             });
         }
-        if retry.backoff_multiplier < 1.0 {
+        if !(1.0..).contains(&retry.backoff_multiplier) {
             return Err(ConfigError::InvalidValue {
                 field: "retry.backoff_multiplier".to_string(),
                 value: retry.backoff_multiplier.to_string(),
@@ -651,12 +710,39 @@ impl ConfigValidator {
         if let Some(program) = &config.program_scheduling {
             let pd_mode = matches!(config.mode, RoutingMode::VllmPrefillDecode { .. });
             if (!matches!(config.mode, RoutingMode::Regular { .. }) && !pd_mode)
-                || pd_mode != program.pd.enabled
                 || (pd_mode && config.connection_mode != ConnectionMode::Http)
             {
                 return Err(ConfigError::IncompatibleConfig {
-                    reason: "Program scheduling requires regular HTTP mode, or vLLM PD HTTP mode with pd.enabled=true".to_string(),
+                    reason: "Program scheduling requires regular HTTP mode or vLLM PD HTTP mode"
+                        .to_string(),
                 });
+            }
+            if pd_mode {
+                program
+                    .pd
+                    .validate()
+                    .map_err(|reason| ConfigError::IncompatibleConfig { reason })?;
+            } else if program.pd.warm_remote_enabled() {
+                return Err(ConfigError::IncompatibleConfig {
+                    reason: "warm remote KV reuse and automatic TTL require HTTP PD mode".into(),
+                });
+            }
+            if let RoutingMode::VllmPrefillDecode {
+                prefill_urls,
+                decode_urls,
+                ..
+            } = &config.mode
+            {
+                if prefill_urls
+                    .iter()
+                    .map(|(url, _)| url.as_str())
+                    .chain(decode_urls.iter().map(String::as_str))
+                    .any(crate::backend::is_grpc_url)
+                {
+                    return Err(ConfigError::IncompatibleConfig {
+                        reason: "Program scheduling dispatches over HTTP and cannot run on grpc:// P/D workers".to_string(),
+                    });
+                }
             }
             if pd_mode
                 && (!(0.0..=1.0).contains(&program.pd.prefill_kv_high_watermark)
@@ -925,6 +1011,18 @@ impl ConfigValidator {
     }
 }
 
+fn strictly_increasing_f64(values: &[f64]) -> bool {
+    !values.is_empty()
+        && values.iter().all(|value| value.is_finite() && *value > 0.0)
+        && values.windows(2).all(|pair| pair[0] < pair[1])
+}
+
+fn strictly_increasing_usize(values: &[usize]) -> bool {
+    !values.is_empty()
+        && values.iter().all(|value| *value > 0)
+        && values.windows(2).all(|pair| pair[0] < pair[1])
+}
+
 /// Base URL without the optional `@dp_rank` suffix.
 ///
 /// Mirrors `Worker::normalised_url()`: static KV event sources are looked up by
@@ -938,6 +1036,7 @@ fn base_url_without_rank(url: &str) -> &str {
 }
 
 #[cfg(all(test, feature = "cpu", feature = "ready"))]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
 
@@ -1031,6 +1130,16 @@ mod tests {
         for config in invalid {
             assert!(ConfigValidator::validate_program_scheduling(&config).is_err());
         }
+    }
+
+    #[test]
+    fn prediction_off_skips_unused_profile_file_validation() {
+        let mut config = ProgramSchedulingConfig::default();
+        config.prediction_profile.mode = PredictionMode::Off;
+        config.prediction_profile.profile_path =
+            Some("/definitely/missing/prediction-profile.json".to_string());
+
+        assert!(ConfigValidator::validate_program_scheduling(&config).is_ok());
     }
 
     #[test]
@@ -1201,6 +1310,32 @@ mod tests {
     }
 
     #[test]
+    fn test_validate_cache_aware_balance_rel_threshold_bounds() {
+        let make_config = |balance_rel_threshold| {
+            RouterConfig::new(
+                RoutingMode::Regular {
+                    worker_urls: vec!["http://worker1:8000".to_string()],
+                },
+                PolicyConfig::CacheAware {
+                    cache_threshold: 0.5,
+                    balance_abs_threshold: 32,
+                    balance_rel_threshold,
+                    eviction_interval_secs: 60,
+                    max_tree_size: 1000,
+                },
+            )
+        };
+
+        assert!(ConfigValidator::validate(&make_config(1.0)).is_ok());
+
+        let result = ConfigValidator::validate(&make_config(f32::NAN));
+        assert!(matches!(
+            result,
+            Err(ConfigError::InvalidValue { ref field, .. }) if field == "balance_rel_threshold"
+        ));
+    }
+
+    #[test]
     fn test_validate_cache_aware_single_worker() {
         // Cache-aware with single worker should be allowed (even if not optimal)
         let config = RouterConfig::new(
@@ -1232,6 +1367,46 @@ mod tests {
             PolicyConfig::Random,
         );
 
+        assert!(ConfigValidator::validate(&config).is_ok());
+    }
+
+    #[test]
+    fn ttl_subknobs_alone_do_not_enable_the_warm_executor() {
+        let mode = || RoutingMode::VllmPrefillDecode {
+            prefill_urls: vec![("http://prefill:8000".to_string(), None)],
+            decode_urls: vec!["http://decode:8000".to_string()],
+            prefill_policy: None,
+            decode_policy: None,
+            discovery_address: None,
+        };
+        for pd in [
+            serde_json::json!({"feedback": true}),
+            serde_json::json!({"ttl_online": true}),
+        ] {
+            let mut config = RouterConfig::new(mode(), PolicyConfig::RoundRobin);
+            config.program_scheduling = Some(
+                serde_json::from_value(serde_json::json!({
+                    "token_capacity_per_dp_rank": 100000,
+                    "enable_batch_gain_admission": false,
+                    "pd": pd
+                }))
+                .unwrap(),
+            );
+            assert!(
+                ConfigValidator::validate(&config).is_err(),
+                "accepted a TTL sub-knob without automatic_ttl: {pd}"
+            );
+        }
+        // A master switch keeps the sub-knob valid.
+        let mut config = RouterConfig::new(mode(), PolicyConfig::RoundRobin);
+        config.program_scheduling = Some(
+            serde_json::from_value(serde_json::json!({
+                "token_capacity_per_dp_rank": 100000,
+                "enable_batch_gain_admission": false,
+                "pd": {"warm_remote": true, "feedback": true}
+            }))
+            .unwrap(),
+        );
         assert!(ConfigValidator::validate(&config).is_ok());
     }
 
@@ -1377,6 +1552,26 @@ mod tests {
     }
 
     #[test]
+    fn test_validate_retry_backoff_multiplier_bounds() {
+        let mut config = RouterConfig::new(
+            RoutingMode::Regular {
+                worker_urls: vec!["http://worker:8000".to_string()],
+            },
+            PolicyConfig::Random,
+        );
+
+        config.retry.backoff_multiplier = 1.0;
+        assert!(ConfigValidator::validate(&config).is_ok());
+
+        config.retry.backoff_multiplier = f32::NAN;
+        let result = ConfigValidator::validate(&config);
+        assert!(matches!(
+            result,
+            Err(ConfigError::InvalidValue { ref field, .. }) if field == "retry.backoff_multiplier"
+        ));
+    }
+
+    #[test]
     fn test_moriio_requires_service_discovery() {
         let mut config = RouterConfig::new(
             RoutingMode::Regular {
@@ -1412,6 +1607,61 @@ mod tests {
 
         let result = ConfigValidator::validate(&config);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_grpc_pd_workers_reject_service_discovery() {
+        let pd_mode = |discovery_address: Option<String>| RoutingMode::VllmPrefillDecode {
+            prefill_urls: vec![("grpc://prefill:50051".to_string(), None)],
+            decode_urls: vec!["grpc://decode:50052".to_string()],
+            prefill_policy: None,
+            decode_policy: None,
+            discovery_address,
+        };
+
+        let zmq = RouterConfig::new(
+            pd_mode(Some("0.0.0.0:36367".to_string())),
+            PolicyConfig::Random,
+        );
+        let mut k8s = RouterConfig::new(pd_mode(None), PolicyConfig::Random);
+        k8s.discovery = Some(DiscoveryConfig {
+            enabled: true,
+            prefill_selector: vec![("role".to_string(), "prefill".to_string())]
+                .into_iter()
+                .collect(),
+            ..Default::default()
+        });
+        for config in [zmq, k8s] {
+            let err = ConfigValidator::validate(&config).unwrap_err();
+            assert!(err.to_string().contains("service discovery"), "{err}");
+        }
+
+        let static_only = RouterConfig::new(pd_mode(None), PolicyConfig::Random);
+        assert!(ConfigValidator::validate(&static_only).is_ok());
+    }
+
+    #[test]
+    fn test_grpc_pd_workers_reject_program_scheduling() {
+        let program: ProgramSchedulingConfig = serde_json::from_value(serde_json::json!({
+            "token_capacity_per_dp_rank": 100000,
+            "enable_batch_gain_admission": false,
+        }))
+        .unwrap();
+        let config = |prefill: &str, decode: &str| RouterConfig {
+            mode: RoutingMode::VllmPrefillDecode {
+                prefill_urls: vec![(prefill.to_string(), None)],
+                decode_urls: vec![decode.to_string()],
+                prefill_policy: None,
+                decode_policy: None,
+                discovery_address: None,
+            },
+            program_scheduling: Some(program.clone()),
+            ..RouterConfig::default()
+        };
+        assert!(ConfigValidator::validate(&config("http://p:8000", "http://d:8000")).is_ok());
+        let err =
+            ConfigValidator::validate(&config("grpc://p:50051", "grpc://d:50052")).unwrap_err();
+        assert!(err.to_string().contains("grpc://"), "{err}");
     }
 
     fn pd_config_with_static_kv_sources() -> RouterConfig {

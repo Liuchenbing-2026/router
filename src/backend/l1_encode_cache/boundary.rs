@@ -121,6 +121,7 @@ impl BoundaryMatcher {
 
     /// Cut positions in `text`, which must itself start at a cut position.
     #[cfg(all(test, feature = "cpu", feature = "ready"))]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub(crate) fn boundaries(&self, text: &str) -> Vec<usize> {
         self.cuts(text, 0).into_iter().map(|(end, _)| end).collect()
     }
@@ -323,7 +324,7 @@ pub(crate) async fn load_boundary_matcher(model: &str) -> Result<BoundaryMatcher
 
 /// Added tokens as vllm-tokenizer sees them, after config checks.
 pub(crate) async fn load_added_tokens(model: &str) -> Result<AddedTokenSet> {
-    let files = ResolvedModelFiles::new(model).await?;
+    let files = ResolvedModelFiles::new(model, None).await?;
     let TokenizerSource::HuggingFace(path) = files.tokenizer else {
         bail!("L1 supports tokenizer.json models only");
     };

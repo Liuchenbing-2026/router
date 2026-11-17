@@ -57,7 +57,52 @@ A worker pool is all HTTP or all gRPC. Mixed schemes fail during startup or
 tonic, but still calls the gRPC port, not the OpenAI HTTP port.
 
 Worker liveness on `grpc://` uses `grpc.health.v1` Check with an empty service
-name. `--health-check-endpoint` only applies to HTTP workers.
+name. `--health-check-endpoint` only applies to HTTP workers. The router runs
+that check in the background and remembers the result. A Rust gRPC worker does
+not log this RPC. A quiet worker log during these probes is normal.
+
+Two curls are usable, and they check different things. With the ports from the
+start example below, the router is `30000` and the worker HTTP port is `8000`.
+
+The router reports the stored health flag. This request does not call the
+worker, so it adds nothing to the worker log:
+
+```bash
+curl -sS http://127.0.0.1:30000/health
+```
+
+A healthy pool prints `All servers healthy`. The status is 200. To print the
+status code itself:
+
+```bash
+curl -sS -o /dev/null -w "%{http_code}\n" http://127.0.0.1:30000/health
+```
+
+The worker's own HTTP server answers a separate `/health` on `--port`. The
+router does not use this URL for a `grpc://` worker. A healthy response is
+status 200 with an empty body, so a plain curl prints nothing. Print the status
+code to see it:
+
+```bash
+curl -sS -o /dev/null -w "%{http_code}\n" http://127.0.0.1:8000/health
+```
+
+That prints `200`. It does not mean `grpc.health.v1` is serving. The gRPC port
+does not speak HTTP, so curl against `--grpc-port` is not a health check. Probe
+the port the router actually uses:
+
+```bash
+grpc_health_probe -addr=127.0.0.1:50051
+```
+
+A healthy worker prints `status: SERVING` and the command exits 0. This is the
+same `grpc.health.v1` Check the router runs, not a copy of the stored flag.
+The flag flips only after `--health-success-threshold` consecutive successes
+(default 2) or `--health-failure-threshold` consecutive failures (default 3).
+While a worker is failing or recovering, a one-off probe can print `SERVING`
+while router `/health` is still 503, or fail while `/health` is still 200.
+This RPC is not written to the worker log either. `/health_generate` on a gRPC
+pool returns `501`.
 
 ## Request Preparation
 
@@ -199,6 +244,40 @@ Multimodal content also currently returns 400 on the gRPC path. The proto has
 `GenerateRequest.media`, but the router does not yet populate it from OpenAI
 chat content. Supporting it requires mapping OpenAI image/media parts into the
 proto media fields and adding parity tests against vLLM HTTP behavior.
+
+## P/D Disaggregation
+
+`--vllm-pd-disaggregation` accepts all-`grpc://` prefill and decode pools.
+The router sends P a unary one-token `Generate` and D a `GenerateStream`, both
+carrying the connector's JSON in `GenerateRequest.kv.kv_transfer_params`.
+P's `FinishInfo.kv_transfer_params` is handed to D. NIXL push mode runs both
+legs concurrently once P's push identity is cached.
+
+**P/D workers must run vLLM ≥ 0.30.0.** v0.29.x passes integer connector
+fields such as ports to the engine as floats, so every decode finishes
+`abort` with no tokens. Those workers still pass the gRPC health probe.
+At startup the router reads each gRPC P/D worker's `engine_version` and
+warns when it is older than 0.30.0. Colocated gRPC serving works on v0.29.
+
+A P or D leg that finishes `abort` fails the request. A streaming decode that
+fails after its stream opened still counts as a decode error. When a leg is
+dropped before it finishes, for example on client disconnect or a failed
+sibling leg, the router sends that worker `Control.Abort` for the engine
+request id, and repeats it once shortly after if the worker had not yet
+answered the RPC.
+
+The info endpoints behave as in colocated gRPC mode: `/v1/models`,
+`/get_model_info`, and `/get_server_info` are answered from the first prefill
+worker's gRPC control service, and `/health_generate` returns `501`.
+`/flush_cache` also returns `501`, because vLLM's gRPC control service has no
+cache reset. `power_of_two` uses the router's own in-flight counts, since
+`grpc://` workers serve no HTTP `/get_load`.
+
+`--prefill-policy kv_aware` and `cache_aware` score the token ids the router
+sends P, so gRPC P/D needs no HTTP `/tokenize`. KV event sources come from
+each prefill's `Control.GetKvEventSources`, or from
+`--pd-kv-events grpc://prefill:50051=tcp://prefill:5557` when the worker does
+not report them.
 
 ## Backend Modules
 

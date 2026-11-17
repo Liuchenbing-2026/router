@@ -24,6 +24,35 @@ steps:
     key: "build"
     steps:
       - label: ":rust: Build Rust (Release)"
+        if: |
+          build.env("NIGHTLY") != "1" &&
+          !(build.pull_request.labels includes "nightly-test")
+        plugins:
+          - docker#v5.11.0:
+              image: "$RUST_IMAGE"
+              workdir: /workdir
+              volumes:
+                - ".:/workdir"
+              environment:
+                - "CARGO_INCREMENTAL=0"
+                - "RUST_BACKTRACE=1"
+                - "CARGO_PROFILE_RELEASE_LTO=false"
+                - "CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16"
+              command:
+                - bash
+                - -c
+                - |
+                  bash .buildkite/scripts/install_packages.sh rust
+                  cargo build --release
+        artifact_paths:
+          - "target/release/vllm-router"
+        agents:
+          queue: "medium_cpu_queue_premerge"
+
+      - label: ":rust: Build Rust (Release, full optimization)"
+        if: |
+          build.env("NIGHTLY") == "1" ||
+          build.pull_request.labels includes "nightly-test"
         plugins:
           - docker#v5.11.0:
               image: "$RUST_IMAGE"
@@ -45,6 +74,36 @@ steps:
           queue: "medium_cpu_queue_premerge"
 
       - label: ":python: Build Python Wheel"
+        if: |
+          build.env("NIGHTLY") != "1" &&
+          !(build.pull_request.labels includes "nightly-test")
+        plugins:
+          - docker#v5.11.0:
+              image: "$RUST_IMAGE"
+              workdir: /workdir
+              volumes:
+                - ".:/workdir"
+              environment:
+                - "CARGO_INCREMENTAL=0"
+                - "RUST_BACKTRACE=1"
+                - "CARGO_PROFILE_RELEASE_LTO=false"
+                - "CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16"
+              command:
+                - bash
+                - -c
+                - |
+                  source .buildkite/scripts/install_packages.sh python-wheel
+                  python -m build
+        artifact_paths:
+          - "dist/*.whl"
+          - "dist/*.tar.gz"
+        agents:
+          queue: "medium_cpu_queue_premerge"
+
+      - label: ":python: Build Python Wheel (full optimization)"
+        if: |
+          build.env("NIGHTLY") == "1" ||
+          build.pull_request.labels includes "nightly-test"
         plugins:
           - docker#v5.11.0:
               image: "$RUST_IMAGE"
@@ -68,7 +127,7 @@ steps:
 
   # After the CPU build, copy target/release/vllm-router into the image.
   # Steps that depend only on "build" start without waiting for this.
-  # Ready smoke and nightly GSM8K depend on this key.
+  # Ready smoke, nightly GSM8K, and nightly gRPC perf depend on this key.
   - label: ":docker: Build NVIDIA CI image"
     key: "image-build"
     depends_on: "build"
@@ -93,7 +152,8 @@ steps:
       queue: "medium_cpu_queue_premerge"
 
   # Uploads wait for the build group, not for image-build, and not for each other.
-  # Uploaded jobs depend on their upload step. NVIDIA P/D jobs also wait for image-build.
+  # Uploaded jobs depend on their upload step. NVIDIA P/D jobs and the L3
+  # gRPC perf job also wait for image-build.
   # L1: same gate as Omni READY_LABEL_IF. ROCM_ONLY stays on the smoke job.
   - label: ":pipeline: Upload L1 ready"
     key: "upload-ready-pipeline"
